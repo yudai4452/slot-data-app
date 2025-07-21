@@ -1,110 +1,72 @@
-# app.py  ★全置き換え
-
 import io, datetime as dt, pandas as pd, streamlit as st
-from src.drive_client import list_csv_files_recursive, download_file
-from src.etl import normalize
-from src.db import init_db, upsert, get_conn, latest_date_in_db
-from src.parse_meta import parse_meta
+import sqlalchemy as sa
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-DEFAULT_FOLDER_ID = "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"   # ← ご指定フォルダ
+# ---- Streamlit 画面設定 ----
+st.set_page_config(page_title="Slot Manager", layout="wide")
+st.title("🎰 Slot Data Manager")
 
-st.set_page_config(page_title="Slot Data Manager & Visualizer", layout="wide")
-st.title("🎛️ Slot Data Manager & Visualizer")
+# ---- Secrets 読み込み ----
+SA_INFO = st.secrets["gcp_service_account"]
+PG_CFG  = st.secrets["connections"]["slot_db"]
 
-# ---------- 共通：DB 初期化 ----------
-init_db()
+# ---- Google Drive 接続 ----
+@st.cache_resource
+def gdrive():
+    creds = Credentials.from_service_account_info(
+        SA_INFO, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    )
+    return build("drive", "v3", credentials=creds)
+drive = gdrive()
 
-# ---------- サイドバーでモード選択 ----------
-mode = st.sidebar.radio("モード", ("📥 取り込み", "📊 可視化"))
+# ---- Postgres 接続 ----
+@st.cache_resource
+def engine():
+    url = (
+        f"postgresql+psycopg2://{PG_CFG.username}:{PG_CFG.password}"
+        f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}"
+        "?sslmode=require"
+    )
+    return sa.create_engine(url, pool_pre_ping=True)
+eng = engine()
 
-# ▼▼▼ 取り込みモード ▼▼▼ --------------------------------------------------
-if mode == "📥 取り込み":
-    st.header("Google Drive → DB インポート")
+# ---- 1 回だけテーブル作成 ----
+with eng.begin() as conn:
+    conn.exec_driver_sql("""
+    CREATE TABLE IF NOT EXISTS slot_data (
+      store TEXT, machine TEXT, date DATE, "台番号" INT,
+      "累計スタート" INT, "スタート回数" INT,
+      "BB回数" INT, "RB回数" INT, "最大差玉" INT,
+      PRIMARY KEY (store, machine, date, "台番号")
+    )""")
 
-    folder_id = st.text_input("Google Drive フォルダ ID", value=DEFAULT_FOLDER_ID)
+# ---- Drive から CSV 取得 → DB へ ----
+folder_id = st.text_input("Google Drive フォルダ ID")
+if st.button("🚀 インポート"):
+    files = drive.files().list(
+        q=f"'{folder_id}' in parents and name contains '.csv'",
+        fields="files(id,name)", pageSize=1000
+    ).execute()["files"]
+    bar = st.progress(0.0)
+    for i, f in enumerate(files, 1):
+        raw = drive.files().get_media(fileId=f["id"]).execute()
+        df  = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
+        # 例: 店舗・機種・日付をここで手動入力（本格化は後工程）
+        store  = st.text_input("店舗", key=f's{i}')
+        machine= st.text_input("機種", key=f'm{i}')
+        date   = dt.date.today()
+        df["store"]=store; df["machine"]=machine; df["date"]=date
+        with eng.begin() as conn:
+            stmt = pg_insert(sa.Table("slot_data", sa.MetaData(), autoload_with=conn)).\
+                   values(df.to_dict("records")).on_conflict_do_nothing()
+            conn.execute(stmt)
+        bar.progress(i/len(files))
+    st.success("完了！")
 
-    # ---------- 🔍 スキャン + インポート UI ----------
-    
-    # ① Drive をスキャンして結果を session_state に保存
-    if st.button("🔍 ファイル自動スキャン") and folder_id:
-        files = list_csv_files_recursive(folder_id)
-        st.session_state["scan_files"] = files
-        st.session_state["scan_done"]  = True
-        st.rerun()                      # ← すぐ再実行
-    
-    # ② スキャン済みなら取り込み画面を表示
-    if st.session_state.get("scan_done"):
-        files = st.session_state["scan_files"]
-    
-        # --- 日付レンジ入力 ---
-        db_latest = latest_date_in_db()
-        col1, col2 = st.columns(2)
-        start_d = col1.date_input("Start date", value=db_latest or dt.date(2000, 1, 1))
-        end_d   = col2.date_input("End date",   value=dt.date.today())
-    
-        # --- 日付でフィルタ ---
-        target = []
-        for f in files:
-            date_str = f["name"][-14:-4]              # YYYY-MM-DD
-            try:
-                f_date = dt.date.fromisoformat(date_str)
-            except ValueError:
-                continue
-            if start_d <= f_date <= end_d:
-                target.append(f)
-            
-        target = target[:1]
-        st.write(f"🎯 対象 CSV: **{len(target)} 件**")
-    
-        # ③ インポート実行ボタン
-        if st.button("🚀 一括インポート", key="import", disabled=not target):
-            bar    = st.progress(0.0)
-            status = st.empty()
-            for i, meta in enumerate(target, 1):
-                
-                 # 👇 ★★ ここにデバッグ出力を入れる ★★
-                st.write({"i": i, "path": meta.get("path"), "name": meta["name"]})
-                
-                status.write(f"⏳ {meta['name']} …")
-                raw = download_file(meta["id"])
-                df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
-                store, machine, date = parse_meta(meta["path"])
-                df = normalize(df_raw, store)
-                df["store"], df["machine"], df["date"] = store, machine, date
-                upsert(df)
-                bar.progress(i / len(target))
-            status.write("✅ 完了！")
-            st.success(f"{len(target)} 件インポートしました")
-            st.session_state.pop("scan_done")   # 次回のためにリセット
-    
-    # ▲▲▲ 取り込みモードここまで ▲▲▲ ----------------------------------------
-
-# ▼▼▼ 可視化モード ▼▼▼ ----------------------------------------------------
-else:
-    st.header("DB から可視化")
-
-    conn = get_conn()
-    stores = conn.query("SELECT DISTINCT store FROM slot_data")["store"].tolist()
-    if not stores:
-        st.info("まず『取り込み』タブでデータを入れてください。")
-        st.stop()
-
-    store = st.sidebar.selectbox("店舗", stores)
-    machines = conn.query(
-        "SELECT DISTINCT machine FROM slot_data WHERE store=:s",
-        params={"s": store})["machine"].tolist()
-    machine = st.sidebar.selectbox("機種", machines)
-    metric = st.sidebar.selectbox("指標", ["合成確率", "BB確率", "RB確率"])
-
-    sql = f"""
-      SELECT date, 台番号, {metric}
-        FROM slot_data
-       WHERE store=:store AND machine=:machine
-       ORDER BY date
-    """
-    df = conn.query(sql, params=dict(store=store, machine=machine))
-    if df.empty:
-        st.warning("データがありません")
-    else:
-        st.line_chart(df.pivot(index="date", columns="台番号", values=metric))
-# ▲▲▲ 可視化モードここまで ▲▲▲ ------------------------------------------
+# ---- 可視化 ----
+with eng.connect() as conn:
+    df = pd.read_sql("SELECT * FROM slot_data LIMIT 100", conn)
+st.dataframe(df)
