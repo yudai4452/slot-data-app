@@ -1,3 +1,4 @@
+import streamlit as st
 import pandas as pd
 from sqlalchemy import MetaData, Table
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert   # ← SQLite 専用
