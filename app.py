@@ -1,5 +1,5 @@
 import io, pandas as pd, streamlit as st
-from src.drive_client import list_csv_files, download_file
+from src.drive_client import list_csv_files_recursive, download_file
 from src.etl import normalize
 from src.db import init_db, upsert, get_conn
 from src.parse_meta import parse_meta
