@@ -2,3 +2,5 @@ streamlit
 pandas
 google-api-python-client
 google-auth
+sqlalchemy
+psycopg2-binary
