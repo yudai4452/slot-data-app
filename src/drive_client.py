@@ -1,11 +1,10 @@
 # src/drive_client.py
-import io
-import streamlit as st
+import io, streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# ❶ Drive API ハンドルをキャッシュ
+# ---------- 認証ハンドル ----------
 @st.cache_resource
 def get_drive():
     scopes = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -16,21 +15,33 @@ def get_drive():
 
 drive = get_drive()
 
-# ❷ 指定フォルダ直下の CSV を取得
-def list_csv_files(folder_id: str):
-    q = f"'{folder_id}' in parents and mimeType='text/csv'"
-    res = drive.files().list(
-        q=q,
-        fields="files(id, name, size, modifiedTime)",
-        pageSize=1000,
-        supportsAllDrives=True,
-    ).execute()
-    return res.get("files", [])
+# ---------- 再帰で .csv を全部集める ----------
+def list_csv_files_recursive(folder_id: str):
+    """
+    指定フォルダ以下のサブフォルダをすべて探索し、
+    名前が .csv で終わるファイルを返す。
+    戻り値: [{'id': ..., 'name': ..., 'mimeType': ...}, ...]
+    """
+    all_files, queue = [], [folder_id]
+    while queue:
+        fid = queue.pop()
+        res = drive.files().list(
+            q=f"'{fid}' in parents and trashed = false",
+            fields="files(id, name, mimeType)",
+            pageSize=1000,
+            supportsAllDrives=True,
+        ).execute()
+        for f in res.get("files", []):
+            if f["mimeType"] == "application/vnd.google-apps.folder":
+                queue.append(f["id"])                            # サブフォルダは再探索
+            elif f["name"].lower().endswith(".csv"):
+                all_files.append(f)
+    return all_files
 
-# ❸ 1 ファイルを bytes としてダウンロード
+# ---------- 1 ファイルを bytes で取得 ----------
 def download_file(file_id: str) -> bytes:
     request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
-    fh = io.BytesIO()
-    MediaIoBaseDownload(fh, request).next_chunk()
-    fh.seek(0)
-    return fh.read()
+    buf = io.BytesIO()
+    MediaIoBaseDownload(buf, request).next_chunk()
+    buf.seek(0)
+    return buf.read()
