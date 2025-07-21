@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import MetaData, Table
+from sqlalchemy import text,MetaData, Table
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert   # ← SQLite 専用
 # Postgres の場合は: from sqlalchemy.dialects.postgresql import insert as pg_insert
 
