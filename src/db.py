@@ -47,3 +47,8 @@ def upsert(df: pd.DataFrame):
     conn = get_conn()
     df.to_sql("slot_data", con=conn.session.bind,
               if_exists="append", index=False, method="multi")
+
+def latest_date_in_db():
+    conn = get_conn()
+    row = conn.session.execute(text("SELECT MAX(date) AS max_d FROM slot_data")).first()
+    return row.max_d if row else None     # → datetime.date か None
