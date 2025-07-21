@@ -1,87 +1,99 @@
-import io, pandas as pd, streamlit as st
+# app.py  ★全置き換え
+
+import io, datetime as dt, pandas as pd, streamlit as st
 from src.drive_client import list_csv_files_recursive, download_file
 from src.etl import normalize
-from src.db import init_db, upsert, get_conn
+from src.db import init_db, upsert, get_conn, latest_date_in_db
 from src.parse_meta import parse_meta
 
-st.set_page_config(page_title="Slot Data Manager / Visualizer", layout="wide")
+DEFAULT_FOLDER_ID = "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"   # ← ご指定フォルダ
+
+st.set_page_config(page_title="Slot Data Manager & Visualizer", layout="wide")
 st.title("🎛️ Slot Data Manager & Visualizer")
 
-# ---------- 共通：DB 初期化 & サイドバーでモード選択 ----------
-init_db()                                   # テーブル無ければ作る
-mode = st.sidebar.radio(
-    "モードを選択",
-    options=("📥 データ取り込み", "📊 データ可視化"),
-    index=0,
-)
+# ---------- 共通：DB 初期化 ----------
+init_db()
 
-# ---------- 1) データ取り込み UI ----------
-if mode == "📥 データ取り込み":
+# ---------- サイドバーでモード選択 ----------
+mode = st.sidebar.radio("モード", ("📥 取り込み", "📊 可視化"))
+
+# ▼▼▼ 取り込みモード ▼▼▼ --------------------------------------------------
+if mode == "📥 取り込み":
     st.header("Google Drive → DB インポート")
-    
-    DEFAULT_FOLDER_ID = "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"
-    FOLDER_ID = st.text_input("Google Drive フォルダ ID", value=DEFAULT_FOLDER_ID)
-    if st.button("📂 CSV 一覧を取得") and FOLDER_ID:
-        files = list_csv_files_recursive(FOLDER_ID)
+
+    folder_id = st.text_input("Google Drive フォルダ ID", value=DEFAULT_FOLDER_ID)
+
+    if st.button("🔍 ファイル自動スキャン") and folder_id:
+        # 1. Drive を再帰列挙
+        files = list_csv_files_recursive(folder_id)
         if not files:
             st.warning("CSV が見つかりませんでした")
             st.stop()
 
-        file_df = pd.DataFrame(files)[["name", "modifiedTime", "size"]]
-        st.dataframe(file_df, height=300)
+        # 2. 取り込み対象期間を決める ---------------★ここが新機能
+        db_latest = latest_date_in_db()       # 直近の日付（無ければ None）
+        col1, col2 = st.columns(2)
+        with col1:
+            start_d = st.date_input("Start date",
+                                    value=db_latest or dt.date(2000, 1, 1))
+        with col2:
+            end_d   = st.date_input("End date", value=dt.date.today())
 
-        selected = st.multiselect(
-            "取り込むファイルを選択",
-            options=file_df.index,
-            format_func=lambda i: file_df.loc[i, "name"],
-        )
+        # 3. 日付でフィルタ ↓
+        target = []
+        for f in files:
+            date_str = f["name"][-14:-4]            # '2025-07-19' 抜き取り
+            try:
+                f_date = dt.date.fromisoformat(date_str)
+            except ValueError:
+                continue
+            if start_d <= f_date <= end_d:
+                target.append(f)
 
-        if st.button("🚀 選択した CSV を取り込む", disabled=not selected):
+        st.write(f"🎯 対象 CSV: **{len(target)} 件**")
+
+        # 4. インポート実行 ------------------------
+        if st.button("🚀 一括インポート", disabled=not target):
             bar = st.progress(0.0)
-            for idx, i in enumerate(selected, 1):
-                meta = files[i]
+            for i, meta in enumerate(target, 1):
                 raw = download_file(meta["id"])
                 df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
 
-                store, machine, date = parse_meta(meta["name"])
+                store, machine, date = parse_meta(meta["path"])
                 df = normalize(df_raw, store)
-                df["store"], df["machine"] = store, machine
-                df["date"] = pd.to_datetime(date).date()
+                df["store"], df["machine"], df["date"] = store, machine, date
 
                 upsert(df)
-                bar.progress(idx / len(selected), f"{idx}/{len(selected)}")
-            st.success(f"✅ {len(selected)} 件インポート完了！")
+                bar.progress(i / len(target))
+            st.success(f"✅ {len(target)} 件取り込み完了！")
+# ▲▲▲ 取り込みモードここまで ▲▲▲ ----------------------------------------
 
-# ---------- 2) データ可視化 UI ----------
+# ▼▼▼ 可視化モード ▼▼▼ ----------------------------------------------------
 else:
     st.header("DB から可視化")
 
     conn = get_conn()
-
     stores = conn.query("SELECT DISTINCT store FROM slot_data")["store"].tolist()
     if not stores:
-        st.info("まだデータがありません。まず『データ取り込み』で CSV を入れてください。")
+        st.info("まず『取り込み』タブでデータを入れてください。")
         st.stop()
 
     store = st.sidebar.selectbox("店舗", stores)
-
     machines = conn.query(
-        "SELECT DISTINCT machine FROM slot_data WHERE store = :s",
+        "SELECT DISTINCT machine FROM slot_data WHERE store=:s",
         params={"s": store})["machine"].tolist()
     machine = st.sidebar.selectbox("機種", machines)
-
-    metric = st.sidebar.selectbox("表示項目", ["合成確率", "BB確率", "RB確率"])
+    metric = st.sidebar.selectbox("指標", ["合成確率", "BB確率", "RB確率"])
 
     sql = f"""
-    SELECT date, 台番号, {metric}
-      FROM slot_data
-     WHERE store = :store AND machine = :machine
-     ORDER BY date
+      SELECT date, 台番号, {metric}
+        FROM slot_data
+       WHERE store=:store AND machine=:machine
+       ORDER BY date
     """
     df = conn.query(sql, params=dict(store=store, machine=machine))
-
     if df.empty:
-        st.warning("該当データがありません")
+        st.warning("データがありません")
     else:
-        pivot = df.pivot(index="date", columns="台番号", values=metric)
-        st.line_chart(pivot)
+        st.line_chart(df.pivot(index="date", columns="台番号", values=metric))
+# ▲▲▲ 可視化モードここまで ▲▲▲ ------------------------------------------
