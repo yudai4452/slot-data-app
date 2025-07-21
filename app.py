@@ -22,7 +22,7 @@ if mode == "📥 データ取り込み":
     DEFAULT_FOLDER_ID = "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"
     FOLDER_ID = st.text_input("Google Drive フォルダ ID", value=DEFAULT_FOLDER_ID)
     if st.button("📂 CSV 一覧を取得") and FOLDER_ID:
-        files = list_csv_files(FOLDER_ID)
+        files = list_csv_files_recursive(FOLDER_ID)
         if not files:
             st.warning("CSV が見つかりませんでした")
             st.stop()
