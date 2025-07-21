@@ -52,7 +52,7 @@ if mode == "📥 取り込み":
                 continue
             if start_d <= f_date <= end_d:
                 target.append(f)
-    
+        target = target[:1]
         st.write(f"🎯 対象 CSV: **{len(target)} 件**")
     
         # ③ インポート実行ボタン
