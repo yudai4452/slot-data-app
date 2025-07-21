@@ -52,6 +52,7 @@ if mode == "📥 取り込み":
                 continue
             if start_d <= f_date <= end_d:
                 target.append(f)
+            
         target = target[:1]
         st.write(f"🎯 対象 CSV: **{len(target)} 件**")
     
@@ -60,6 +61,10 @@ if mode == "📥 取り込み":
             bar    = st.progress(0.0)
             status = st.empty()
             for i, meta in enumerate(target, 1):
+                
+                 # 👇 ★★ ここにデバッグ出力を入れる ★★
+                st.write({"i": i, "path": meta.get("path"), "name": meta["name"]})
+                
                 status.write(f"⏳ {meta['name']} …")
                 raw = download_file(meta["id"])
                 df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
