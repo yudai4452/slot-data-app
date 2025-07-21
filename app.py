@@ -18,8 +18,9 @@ mode = st.sidebar.radio(
 # ---------- 1) データ取り込み UI ----------
 if mode == "📥 データ取り込み":
     st.header("Google Drive → DB インポート")
-
-    FOLDER_ID = st.text_input("Google Drive フォルダ ID")
+    
+    DEFAULT_FOLDER_ID = "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"
+    FOLDER_ID = st.text_input("Google Drive フォルダ ID", value=DEFAULT_FOLDER_ID)
     if st.button("📂 CSV 一覧を取得") and FOLDER_ID:
         files = list_csv_files(FOLDER_ID)
         if not files:
