@@ -3,6 +3,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy import text,MetaData, Table
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert   # ← SQLite 専用
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 # Postgres の場合は: from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 @st.cache_resource
