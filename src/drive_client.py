@@ -1,47 +1,39 @@
-# src/drive_client.py
+# src/drive_client.py  ★全置き換え
+
 import io, streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# ---------- 認証ハンドル ----------
 @st.cache_resource
-def get_drive():
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+def _drive():
     creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], scopes=scopes
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
     )
     return build("drive", "v3", credentials=creds)
 
-drive = get_drive()
+drive = _drive()
 
-# ---------- 再帰で .csv を全部集める ----------
-def list_csv_files_recursive(folder_id: str):
-    """
-    指定フォルダ以下のサブフォルダをすべて探索し、
-    名前が .csv で終わるファイルを返す。
-    戻り値: [{'id': ..., 'name': ..., 'mimeType': ...}, ...]
-    """
-    all_files, queue = [], [folder_id]
+def list_csv_files_recursive(folder_id: str, cur_path=""):
+    """フォルダ以下すべて探索して .csv を返す（path 付き）"""
+    out, queue = [], [(folder_id, cur_path)]
     while queue:
-        fid = queue.pop()
+        fid, path = queue.pop()
         res = drive.files().list(
-            q=f"'{fid}' in parents and trashed = false",
-            fields="files(id, name, mimeType, modifiedTime, size)",
-            pageSize=1000,
-            supportsAllDrives=True,
-        ).execute()
+            q=f"'{fid}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            pageSize=1000, supportsAllDrives=True).execute()
         for f in res.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
-                queue.append(f["id"])                            # サブフォルダは再探索
+                queue.append((f["id"], f"{path}/{f['name']}"))
             elif f["name"].lower().endswith(".csv"):
-                all_files.append(f)
-    return all_files
+                out.append({**f, "path": f"{path}/{f['name']}"})
+    return out
 
-# ---------- 1 ファイルを bytes で取得 ----------
 def download_file(file_id: str) -> bytes:
-    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    req = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
     buf = io.BytesIO()
-    MediaIoBaseDownload(buf, request).next_chunk()
+    MediaIoBaseDownload(buf, req).next_chunk()
     buf.seek(0)
     return buf.read()
