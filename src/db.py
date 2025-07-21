@@ -51,8 +51,8 @@ def upsert(df: pd.DataFrame):
     engine = conn.session.bind
 
     # slot_data テーブルメタデータを取得
-    meta = MetaData(bind=engine)
-    slot = Table("slot_data", meta, autoload_with=engine)
+    meta = MetaData()                                     # bind は付けない
+    slot = Table("slot_data", meta, autoload_with=engine) # ← autoload_with で反映
 
     # SQLite: INSERT OR IGNORE で衝突行はスキップ
     for rec in df.to_dict(orient="records"):
