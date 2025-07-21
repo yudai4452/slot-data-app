@@ -41,14 +41,16 @@ if mode == "📥 取り込み":
 
         # 3. 日付でフィルタ ↓
         target = []
-        for f in files:
-            date_str = f["name"][-14:-4]            # '2025-07-19' 抜き取り
-            try:
-                f_date = dt.date.fromisoformat(date_str)
-            except ValueError:
-                continue
-            if start_d <= f_date <= end_d:
-                target.append(f)
+        # ★ target を一時的に 1 件に絞る
+        target = target[:1]
+        #for f in files:
+            #date_str = f["name"][-14:-4]            # '2025-07-19' 抜き取り
+            #try:
+                #f_date = dt.date.fromisoformat(date_str)
+            #except ValueError:
+                #continue
+            #if start_d <= f_date <= end_d:
+                #target.append(f)
 
         st.write(f"🎯 対象 CSV: **{len(target)} 件**")
 
