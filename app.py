@@ -50,7 +50,8 @@ if mode == "📥 取り込み":
                 continue
             if start_d <= f_date <= end_d:
                 target.append(f)
-
+        # ★ target を一時的に 1 件に絞る
+        target = target[:1]
         st.write(f"🎯 対象 CSV: **{len(target)} 件**")
 
         # 4. インポート実行 ------------------------
