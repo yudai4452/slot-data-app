@@ -1,6 +1,7 @@
-import streamlit as st
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import MetaData, Table
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert   # ← SQLite 専用
+# Postgres の場合は: from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 @st.cache_resource
 def get_conn():
@@ -45,6 +46,20 @@ def latest_date_in_db():
     return row.d
 
 def upsert(df: pd.DataFrame):
-    conn = get_conn()
-    df.to_sql("slot_data", con=conn.session.bind,
-              if_exists="append", index=False, method="multi")
+    conn   = get_conn()
+    engine = conn.session.bind
+
+    # slot_data テーブルメタデータを取得
+    meta = MetaData(bind=engine)
+    slot = Table("slot_data", meta, autoload_with=engine)
+
+    # SQLite: INSERT OR IGNORE で衝突行はスキップ
+    for rec in df.to_dict(orient="records"):
+        stmt = (
+            sqlite_insert(slot)
+            .values(**rec)
+            .prefix_with("OR IGNORE")        # ← ココがポイント
+        )
+        conn.session.execute(stmt)
+
+    conn.session.commit()
