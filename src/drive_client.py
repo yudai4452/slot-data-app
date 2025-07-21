@@ -27,7 +27,7 @@ def list_csv_files_recursive(folder_id: str):
         fid = queue.pop()
         res = drive.files().list(
             q=f"'{fid}' in parents and trashed = false",
-            fields="files(id, name, mimeType)",
+            fields="files(id, name, mimeType, modifiedTime, size)",
             pageSize=1000,
             supportsAllDrives=True,
         ).execute()
