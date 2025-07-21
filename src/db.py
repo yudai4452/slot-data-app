@@ -39,16 +39,12 @@ def init_db():
     conn.session.execute(text(schema))
     conn.session.commit()
 
+def latest_date_in_db():
+    conn = get_conn()
+    row = conn.session.execute(text("SELECT MAX(date) AS d FROM slot_data")).first()
+    return row.d
+
 def upsert(df: pd.DataFrame):
-    """
-    SQLite の場合は to_sql(append)+PRIMARY KEY衝突無視で OK。
-    Postgres に替える場合は ON CONFLICT DO UPDATE を使う。
-    """
     conn = get_conn()
     df.to_sql("slot_data", con=conn.session.bind,
               if_exists="append", index=False, method="multi")
-
-def latest_date_in_db():
-    conn = get_conn()
-    row = conn.session.execute(text("SELECT MAX(date) AS max_d FROM slot_data")).first()
-    return row.max_d if row else None     # → datetime.date か None
