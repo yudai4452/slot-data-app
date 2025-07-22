@@ -51,10 +51,10 @@ COLUMN_MAP = {
 }
 
 # ---------- UTILS ----------
-def list_csv_recursive(folder_id):
-    all_files, q = [], [folder_id]
-    while q:
-        fid = q.pop()
+def list_csv_recursive(folder_id: str):
+    all_files, queue = [], [(folder_id, "")]         # ← path も持つ
+    while queue:
+        fid, cur_path = queue.pop()
         res = drive.files().list(
             q=f"'{fid}' in parents and trashed=false",
             fields="files(id,name,mimeType)",
@@ -62,9 +62,10 @@ def list_csv_recursive(folder_id):
             supportsAllDrives=True).execute()
         for f in res.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
-                q.append(f["id"])
+                queue.append((f["id"], f"{cur_path}/{f['name']}"))
             elif f["name"].lower().endswith(".csv"):
-                all_files.append(f)
+                # ★ ここで 'path' を付加して返す
+                all_files.append({**f, "path": f"{cur_path}/{f['name']}"})
     return all_files
 
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
@@ -125,7 +126,7 @@ if st.button("🚀 取り込み") and folder_id:
     for i, f in enumerate(files, 1):
         raw = drive.files().get_media(fileId=f["id"]).execute()
         df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
-        store, machine, date = parse_meta(f["name"])
+        store, machine, date = parse_meta(f["path"])
         if store not in COLUMN_MAP:
             st.warning(f"マッピング未定義: {store} をスキップ"); continue
         table = ensure_store_table(store)
