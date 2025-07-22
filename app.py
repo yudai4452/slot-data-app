@@ -52,21 +52,21 @@ COLUMN_MAP = {
 
 # ---------- UTILS ----------
 def list_csv_recursive(folder_id: str):
-    all_files, queue = [], [(folder_id, "")]         # ← path も持つ
+    """サブフォルダを含め .csv を列挙し 'path' を付ける"""
+    all_files, queue = [], [(folder_id, "")]          # (folder_id, 現在のパス)
     while queue:
-        fid, cur_path = queue.pop()
+        fid, cur = queue.pop()
         res = drive.files().list(
             q=f"'{fid}' in parents and trashed=false",
             fields="files(id,name,mimeType)",
-            pageSize=1000,
-            supportsAllDrives=True).execute()
+            pageSize=1000, supportsAllDrives=True).execute()
         for f in res.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
-                queue.append((f["id"], f"{cur_path}/{f['name']}"))
+                queue.append((f["id"], f"{cur}/{f['name']}"))
             elif f["name"].lower().endswith(".csv"):
-                # ★ ここで 'path' を付加して返す
-                all_files.append({**f, "path": f"{cur_path}/{f['name']}"})
+                all_files.append({**f, "path": f"{cur}/{f['name']}"})  # ★ここ★
     return all_files
+
 
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     # ① 列名を共通化
@@ -113,6 +113,8 @@ def ensure_store_table(store: str):
 def parse_meta(path: str):
     # 例: データ/メッセ武蔵境/マイジャグラーV/slot_machine_data_2025-07-19.csv
     parts = path.strip("/").split("/")
+    if len(parts) < 3:
+        raise ValueError(f"path 形式が想定外: {path}")
     store, machine = parts[-3], parts[-2]
     date = dt.date.fromisoformat(parts[-1][-14:-4])
     return store, machine, date
@@ -124,7 +126,7 @@ if st.button("🚀 取り込み") and folder_id:
     st.write(f"🔍 見つかった CSV: {len(files)} 件")
     bar = st.progress(0.0)
     for i, f in enumerate(files, 1):
-        st.write(f["path"])          # ← 取り込む CSV の相対パスを表示
+        st.write(f.get("path"), f)         # ← 取り込む CSV の相対パスを表示
         raw = drive.files().get_media(fileId=f["id"]).execute()
         df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
         store, machine, date = parse_meta(f["path"])
