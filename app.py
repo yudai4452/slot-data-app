@@ -124,6 +124,7 @@ if st.button("🚀 取り込み") and folder_id:
     st.write(f"🔍 見つかった CSV: {len(files)} 件")
     bar = st.progress(0.0)
     for i, f in enumerate(files, 1):
+        st.write(f["path"])          # ← 取り込む CSV の相対パスを表示
         raw = drive.files().get_media(fileId=f["id"]).execute()
         df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
         store, machine, date = parse_meta(f["path"])
