@@ -145,8 +145,9 @@ if st.button("🚀 取り込み") and folder_id:
     st.success("インポート完了！")
 
 # ---------- 可視化 ----------
-stores = [r[0] for r in eng.execute(sa.text(
-    "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'")).fetchall()]
+with eng.connect() as conn:
+    stores = [r[0] for r in conn.execute(sa.text(
+        "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
 if stores:
     store_sel = st.selectbox("店舗を選択", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
