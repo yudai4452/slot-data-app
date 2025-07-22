@@ -1,37 +1,19 @@
 import io, datetime as dt, pandas as pd, streamlit as st
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-def list_csv_recursive(folder_id: str):
-    """folder_id 以下を再帰的にめぐり .csv ファイルを返す"""
-    all_files, queue = [], [folder_id]
-    while queue:
-        fid = queue.pop()
-        res = drive.files().list(
-            q=f"'{fid}' in parents and trashed=false",
-            fields="files(id,name,mimeType)",
-            pageSize=1000,
-            supportsAllDrives=True,
-        ).execute()
-        for f in res.get("files", []):
-            if f["mimeType"] == "application/vnd.google-apps.folder":
-                queue.append(f["id"])              # ← サブフォルダをキューへ
-            elif f["name"].lower().endswith(".csv"):
-                all_files.append(f)                # ← CSV を収集
-    return all_files
-
-# ---- Streamlit 画面設定 ----
+# ---------- Streamlit 基本 ----------
 st.set_page_config(page_title="Slot Manager", layout="wide")
 st.title("🎰 Slot Data Manager")
 
-# ---- Secrets 読み込み ----
+# ---------- Secrets ----------
 SA_INFO = st.secrets["gcp_service_account"]
 PG_CFG  = st.secrets["connections"]["slot_db"]
 
-# ---- Google Drive 接続 ----
+# ---------- Google Drive ----------
 @st.cache_resource
 def gdrive():
     creds = Credentials.from_service_account_info(
@@ -40,48 +22,110 @@ def gdrive():
     return build("drive", "v3", credentials=creds)
 drive = gdrive()
 
-# ---- Postgres 接続 ----
+# ---------- Postgres ----------
 @st.cache_resource
 def engine():
-    url = (
-        f"postgresql+psycopg2://{PG_CFG.username}:{PG_CFG.password}"
-        f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}"
-        "?sslmode=require"
-    )
+    url = (f"postgresql+psycopg2://{PG_CFG.username}:{PG_CFG.password}"
+           f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}?sslmode=require")
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
-# ---- 1 回だけテーブル作成 ----
-with eng.begin() as conn:
-    conn.exec_driver_sql("""
-    CREATE TABLE IF NOT EXISTS slot_data (
-      store TEXT, machine TEXT, date DATE, "台番号" INT,
-      "累計スタート" INT, "スタート回数" INT,
-      "BB回数" INT, "RB回数" INT, "最大差玉" INT,
-      PRIMARY KEY (store, machine, date, "台番号")
-    )""")
+# ---------- 店舗ごとの列名マッピング ----------
+COLUMN_MAP = {
+    "メッセ武蔵境": {
+        "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
+        "BB回数":"BB回数","RB回数":"RB回数","ART回数":"ART回数","最大持ち玉":"最大持玉",
+        "BB確率":"BB確率","RB確率":"RB確率","ART確率":"ART確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート",
+    },
+    "ジャンジャンマールゴット分倍河原":{
+        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
+        "最大持ち玉":"最大持玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    },
+    "プレゴ立川":{
+        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
+        "最大差玉":"最大差玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    },
+}
 
-# ---- Drive から CSV 取得 → DB へ ----
+# ---------- UTILS ----------
+def list_csv_recursive(folder_id):
+    all_files, q = [], [folder_id]
+    while q:
+        fid = q.pop()
+        res = drive.files().list(
+            q=f"'{fid}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            pageSize=1000,
+            supportsAllDrives=True).execute()
+        for f in res.get("files", []):
+            if f["mimeType"] == "application/vnd.google-apps.folder":
+                q.append(f["id"])
+            elif f["name"].lower().endswith(".csv"):
+                all_files.append(f)
+    return all_files
+
+def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
+    df = df_raw.rename(columns=COLUMN_MAP[store])
+    return df  # 必要に応じて数値変換など追加
+
+def ensure_store_table(store: str):
+    safe = "slot_" + store.replace(" ", "_")
+    meta = sa.MetaData()
+    if not eng.dialect.has_table(eng.connect(), safe):
+        cols = [
+            sa.Column("date", sa.Date),
+            sa.Column("機種", sa.Text),
+        ]
+        for col in COLUMN_MAP[store].values():
+            cols.append(sa.Column(col, sa.Double, nullable=True))
+        cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
+        sa.Table(safe, meta, *cols)
+        meta.create_all(eng)
+    return sa.Table(safe, meta, autoload_with=eng)
+
+def parse_meta(path: str):
+    # 例: データ/メッセ武蔵境/マイジャグラーV/slot_machine_data_2025-07-19.csv
+    parts = path.strip("/").split("/")
+    store, machine = parts[-3], parts[-2]
+    date = dt.date.fromisoformat(parts[-1][-14:-4])
+    return store, machine, date
+
+# ---------- UI ----------
 folder_id = st.text_input("Google Drive フォルダ ID")
-if st.button("🚀 インポート"):
+if st.button("🚀 取り込み") and folder_id:
     files = list_csv_recursive(folder_id)
+    st.write(f"🔍 見つかった CSV: {len(files)} 件")
     bar = st.progress(0.0)
     for i, f in enumerate(files, 1):
         raw = drive.files().get_media(fileId=f["id"]).execute()
-        df  = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
-        # 例: 店舗・機種・日付をここで手動入力（本格化は後工程）
-        store  = st.text_input("店舗", key=f's{i}')
-        machine= st.text_input("機種", key=f'm{i}')
-        date   = dt.date.today()
-        df["store"]=store; df["machine"]=machine; df["date"]=date
+        df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
+        store, machine, date = parse_meta(f["name"])
+        if store not in COLUMN_MAP:
+            st.warning(f"マッピング未定義: {store} をスキップ"); continue
+        table = ensure_store_table(store)
+        df = normalize(df_raw, store)
+        df["機種"], df["date"] = machine, date
+        valid = set(table.c.keys())
+        df = df[[c for c in df.columns if c in valid]]
+        if df.empty: continue
+        stmt = (
+            pg_insert(table)
+            .values(df.to_dict("records"))
+            .on_conflict_do_nothing()
+        )
         with eng.begin() as conn:
-            stmt = pg_insert(sa.Table("slot_data", sa.MetaData(), autoload_with=conn)).\
-                   values(df.to_dict("records")).on_conflict_do_nothing()
             conn.execute(stmt)
         bar.progress(i/len(files))
-    st.write(f"🔍 見つかった CSV: {len(files)} 件")
+    st.success("インポート完了！")
 
-# ---- 可視化 ----
-with eng.connect() as conn:
-    df = pd.read_sql("SELECT * FROM slot_data LIMIT 100", conn)
-st.dataframe(df)
+# ---------- 可視化 ----------
+stores = [r[0] for r in eng.execute(sa.text(
+    "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'")).fetchall()]
+if stores:
+    store_sel = st.selectbox("店舗を選択", stores)
+    tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
+    df_show = pd.read_sql(sa.select(tbl).limit(1000), eng)
+    st.dataframe(df_show)
