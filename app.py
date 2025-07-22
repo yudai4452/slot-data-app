@@ -68,8 +68,31 @@ def list_csv_recursive(folder_id):
     return all_files
 
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
+    # ① 列名を共通化
     df = df_raw.rename(columns=COLUMN_MAP[store])
-    return df  # 必要に応じて数値変換など追加
+
+    # ② “1/300” 形式 → 浮動小数 (1 ÷ 300)
+    prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
+    for col in prob_cols:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                      .str.extract(r"(\d+\.?\d*)")        # 300 を取り出す
+                      .astype(float)
+                      .rdiv(1)                            # 1 / 300
+            )
+
+    # ③ 整数列を Int64 型に
+    int_cols = [
+        "台番号", "累計スタート", "スタート回数",
+        "BB回数", "RB回数", "ART回数",
+        "最大持ち玉", "最大差玉", "前日最終スタート",
+    ]
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
+    return df
 
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
