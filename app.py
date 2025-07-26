@@ -204,11 +204,17 @@ if mode == "📊 可視化":
         st.warning("該当期間にデータがありません")
         st.stop()
 
-    # ---------- 折れ線グラフ ---------- ----------
+    # ---------- 折れ線グラフ：合成確率そのもの ----------
     st.subheader("📈 合成確率（台番号別）")
-    df_show["合成分母"] = df_show["合成確率"].replace(0, pd.NA).rdiv(1)
-    df_line = df_show.pivot(index="date", columns="台番号", values="合成分母")
-    st.line_chart(df_line)
+    line_src = df_show[["date", "台番号", "合成確率"]].dropna()
+
+    line_chart = alt.Chart(line_src).mark_line().encode(
+        x="date:T",
+        y=alt.Y("合成確率:Q", axis=alt.Axis(format=".2%")),
+        color="台番号:N",
+        tooltip=["date", "台番号", alt.Tooltip("合成確率:Q", format=".2%")]
+    ).properties(height=300)
+    st.altair_chart(line_chart, use_container_width=True)
 
     # ---------- ヒートマップ ----------
     st.subheader("🗺️ 日付×台番号 ヒートマップ（BB回数）")
