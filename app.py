@@ -151,7 +151,7 @@ if mode == "📥 データ取り込み":
         for i, f in enumerate(files, 1):
             # ② CSV ダウンロード
             raw = drive.files().get_media(fileId=f["id"]).execute()
-            df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis", errors="skip")
+            df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis", on_bad_lines="skip" )
 
             # ③ メタ情報抽出
             store, machine, date = parse_meta(f["path"])
