@@ -228,22 +228,19 @@ if mode == "📊 可視化":
     if df.empty:
         st.warning("データがありません"); st.stop()
 
-    # 6) 表示形式選択
-    fmt = st.radio("表示形式", ("小数 (0.003)", "% 表示", "1/◯ 表示"), horizontal=True)
+    # 6) 表示形式選択（% 表示, 1/◯ 表示 のみ）
+    fmt = st.radio("表示形式", ("% 表示", "1/◯ 表示"), horizontal=True)
 
     df_plot = df.copy()
     if fmt == "% 表示":
-        df_plot["plot_val"] = df_plot["合成確率"] * 100     # 0-1 → 0-100
+        df_plot["plot_val"] = df_plot["合成確率"] * 100     # 0.008 → 0.8%
         y_axis = alt.Axis(title="合成確率 (%)")
         tooltip_fmt = ".2f"
     elif fmt == "1/◯ 表示":
-        df_plot["plot_val"] = df_plot["合成確率"].replace(0, pd.NA).rdiv(1)
-        y_axis = alt.Axis(title="1 / 合成確率")
-        tooltip_fmt = ".0f"
-    else:  # 小数
-        df_plot["plot_val"] = df_plot["合成確率"]
-        y_axis = alt.Axis(title="合成確率 (小数)")
-        tooltip_fmt = ".4f"
+        df_plot["plot_val"] = df_plot["合成確率"].apply(
+            lambda x: 1/x if pd.notna(x) and x > 0 else pd.NA)
+        y_axis = alt.Axis(title="合成確率の分母 (1/◯)")
+        tooltip_fmt = ".1f"
 
     # 7) 折れ線グラフ
     st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
@@ -253,4 +250,5 @@ if mode == "📊 可視化":
         tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
     ).properties(height=300)
     st.altair_chart(chart, use_container_width=True)
+
 
