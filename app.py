@@ -173,6 +173,8 @@ if mode == "📊 可視化":
         slots = [r[0] for r in conn.execute(q_slot)]
     if not slots:
         st.warning("この機種のデータがありません"); st.stop()
+
+    slots = [int(s) for s in slots if s is not None]
     slot_sel = st.selectbox("台番号", slots)
 
     sql = sa.select(tbl).where(
