@@ -69,37 +69,44 @@ def list_csv_recursive(folder_id: str):
 
 
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
-    """列名を統一し、文字列→数値変換まで行う"""
-
-    # ① 列名を共通化
+    """
+    ❶ 列名を統一
+    ❷ “1/n” → 1÷n、小数はそのまま、“1/0” は 0、空欄は NaN
+    ❸ 整数列を Int64 で整形
+    """
+    # ❶ 列名を COLUMN_MAP でそろえる
     df = df_raw.rename(columns=COLUMN_MAP[store])
 
-    # ② “1/300” 形式 または 小数 表記を float へ
+    # ❷ 確率列を float へ変換
     prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
     for col in prob_cols:
         if col not in df.columns:
             continue
 
         ser = df[col].astype(str)
-
-        # スラッシュを含む行だけ 1 / 分母 に変換
         mask_div = ser.str.contains("/")
+
+        # --- “1/n” 形式 ---
         if mask_div.any():
+            denom = (
+                ser[mask_div]
+                  .str.split("/", expand=True)[1]    # “1/300” → “300”
+                  .astype(float)
+            )
             df.loc[mask_div, col] = (
-                1.0
-                / ser[mask_div]                    # "1/300"
-                    .str.split("/", expand=True)[1] # → "300"
-                    .astype(float)
+                denom.where(denom != 0, pd.NA)       # 分母 0 → NaN
+                     .rdiv(1.0)                      # 1 / n
+                     .fillna(0)                      # NaN (1/0) を 0
             )
 
-        # 残りの行はそのまま数値化（空欄・"--" → NaN）
+        # --- 小数表記や空欄 ---
         df.loc[~mask_div, col] = pd.to_numeric(
-            ser[~mask_div], errors="coerce"
+            ser[~mask_div], errors="coerce"          # 空欄・"--" → NaN
         )
 
-        df[col] = df[col].astype(float)  # 最終的に float 列へ
+        df[col] = df[col].astype(float)
 
-    # ③ 整数列を Int64 に
+    # ❸ 整数列を Int64 型で整形
     int_cols = [
         "台番号", "累計スタート", "スタート回数",
         "BB回数", "RB回数", "ART回数",
@@ -107,12 +114,11 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     ]
     for col in int_cols:
         if col in df.columns:
-            df[col] = (
-                pd.to_numeric(df[col], errors="coerce")
-                  .astype("Int64")
-            )
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     return df
+
+
 
 
 def ensure_store_table(store: str):
