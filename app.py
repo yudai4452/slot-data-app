@@ -192,7 +192,7 @@ if mode == "📊 可視化":
     df_plot["plot_val"] = df_plot["合成確率"]
 
     y_axis = alt.Axis(
-        title="1 / 合成確率",
+        title="合成確率",
         format=".4f",
         labelExpr='"1/" + format(round(1 / datum.value), "d")'
     )
