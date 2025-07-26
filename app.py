@@ -4,6 +4,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+import altair as alt  # ★ 可視化用
 
 # ---------- Streamlit 基本 ----------
 st.set_page_config(page_title="Slot Manager", layout="wide")
@@ -51,9 +52,10 @@ COLUMN_MAP = {
 }
 
 # ---------- UTILS ----------
+
 def list_csv_recursive(folder_id: str):
     """サブフォルダを含め .csv を列挙し 'path' を付ける"""
-    all_files, queue = [], [(folder_id, "")]          # (folder_id, 現在のパス)
+    all_files, queue = [], [(folder_id, "")]  # (folder_id, 現在のパス)
     while queue:
         fid, cur = queue.pop()
         res = drive.files().list(
@@ -64,7 +66,7 @@ def list_csv_recursive(folder_id: str):
             if f["mimeType"] == "application/vnd.google-apps.folder":
                 queue.append((f["id"], f"{cur}/{f['name']}"))
             elif f["name"].lower().endswith(".csv"):
-                all_files.append({**f, "path": f"{cur}/{f['name']}"})  # ★ここ★
+                all_files.append({**f, "path": f"{cur}/{f['name']}"})
     return all_files
 
 
@@ -74,7 +76,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     ❷ “1/n” → 1÷n、小数はそのまま、“1/0” は 0、空欄は NaN
     ❸ 整数列を Int64 で整形
     """
-    # ❶ 列名を COLUMN_MAP でそろえる
     df = df_raw.rename(columns=COLUMN_MAP[store])
 
     # ❷ 確率列を float へ変換
@@ -82,31 +83,15 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     for col in prob_cols:
         if col not in df.columns:
             continue
-
         ser = df[col].astype(str)
         mask_div = ser.str.contains("/")
-
-        # --- “1/n” 形式 ---
         if mask_div.any():
-            denom = (
-                ser[mask_div]
-                  .str.split("/", expand=True)[1]    # “1/300” → “300”
-                  .astype(float)
-            )
-            df.loc[mask_div, col] = (
-                denom.where(denom != 0, pd.NA)       # 分母 0 → NaN
-                     .rdiv(1.0)                      # 1 / n
-                     .fillna(0)                      # NaN (1/0) を 0
-            )
-
-        # --- 小数表記や空欄 ---
-        df.loc[~mask_div, col] = pd.to_numeric(
-            ser[~mask_div], errors="coerce"          # 空欄・"--" → NaN
-        )
-
+            denom = ser[mask_div].str.split("/", expand=True)[1].astype(float)
+            df.loc[mask_div, col] = denom.where(denom != 0, pd.NA).rdiv(1.0).fillna(0)
+        df.loc[~mask_div, col] = pd.to_numeric(ser[~mask_div], errors="coerce")
         df[col] = df[col].astype(float)
 
-    # ❸ 整数列を Int64 型で整形
+    # ❸ 整数列を Int64
     int_cols = [
         "台番号", "累計スタート", "スタート回数",
         "BB回数", "RB回数", "ART回数",
@@ -119,16 +104,11 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     return df
 
 
-
-
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     meta = sa.MetaData()
     if not eng.dialect.has_table(eng.connect(), safe):
-        cols = [
-            sa.Column("date", sa.Date),
-            sa.Column("機種", sa.Text),
-        ]
+        cols = [sa.Column("date", sa.Date), sa.Column("機種", sa.Text)]
         for col in COLUMN_MAP[store].values():
             cols.append(sa.Column(col, sa.Double, nullable=True))
         cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
@@ -136,8 +116,8 @@ def ensure_store_table(store: str):
         meta.create_all(eng)
     return sa.Table(safe, meta, autoload_with=eng)
 
+
 def parse_meta(path: str):
-    # 例: データ/メッセ武蔵境/マイジャグラーV/slot_machine_data_2025-07-19.csv
     parts = path.strip("/").split("/")
     if len(parts) < 3:
         raise ValueError(f"path 形式が想定外: {path}")
@@ -147,12 +127,18 @@ def parse_meta(path: str):
 
 # ---------- UI ----------
 folder_id = st.text_input("Google Drive フォルダ ID")
+
+# 取り込み用 日付レンジ
+col_s, col_e = st.columns(2)
+import_start = col_s.date_input("Import start", value=dt.date(2025, 1, 1))
+import_end   = col_e.date_input("Import end", value=dt.date.today())
+
 if st.button("🚀 取り込み") and folder_id:
-    files = list_csv_recursive(folder_id)
-    st.write(f"🔍 見つかった CSV: {len(files)} 件")
+    files = [f for f in list_csv_recursive(folder_id)
+             if import_start <= parse_meta(f["path"])[2] <= import_end]
+    st.write(f"🔍 対象 CSV: {len(files)} 件")
     bar = st.progress(0.0)
     for i, f in enumerate(files, 1):
-        #st.write(f.get("path"), f)         # ← 取り込む CSV の相対パスを表示
         raw = drive.files().get_media(fileId=f["id"]).execute()
         df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
         store, machine, date = parse_meta(f["path"])
@@ -178,8 +164,12 @@ if st.button("🚀 取り込み") and folder_id:
 with eng.connect() as conn:
     stores = [r[0] for r in conn.execute(sa.text(
         "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
+
 if stores:
     store_sel = st.selectbox("店舗を選択", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
-    df_show = pd.read_sql(sa.select(tbl).limit(1000), eng)
-    st.dataframe(df_show)
+
+    # 可視化用 日付レンジ
+    d1, d2 = st.columns(2)
+    vis_start = d1.date_input("Display start", value=dt.date(2025, 1, 1))
+    vis_end   = d2.date
