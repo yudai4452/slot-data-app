@@ -145,6 +145,55 @@ def parse_meta(path: str):
     date = dt.date.fromisoformat(parts[-1][-14:-4])
     return store, machine, date
 
+# ========================= 取り込みモード =========================
+if mode == "📥 データ取り込み":
+    st.header("Google Drive → Postgres インポート")
+
+    # --- フォルダ & 日付レンジ入力 ---------------------------------
+    folder_id = st.text_input("Google Drive フォルダ ID")
+    c1, c2 = st.columns(2)
+    imp_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
+    imp_end   = c2.date_input("終了日", value=dt.date.today())
+
+    # --- 取り込みボタン ---------------------------------------------
+    if st.button("🚀 インポート実行", disabled=not folder_id):
+        # ① Drive を走査して日付でフィルタ
+        files = [f for f in list_csv_recursive(folder_id)
+                 if imp_start <= parse_meta(f["path"])[2] <= imp_end]
+        st.write(f"🔍 対象 CSV: **{len(files)} 件**")
+
+        bar = st.progress(0.0)
+        for i, f in enumerate(files, 1):
+            # ② CSV ダウンロード
+            raw = drive.files().get_media(fileId=f["id"]).execute()
+            df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis", errors="ignore")
+
+            # ③ メタ情報抽出
+            store, machine, date = parse_meta(f["path"])
+            if store not in COLUMN_MAP:
+                st.warning(f"マッピング未定義: {store} → スキップ"); continue
+
+            # ④ 正規化 & テーブル確保
+            table = ensure_store_table(store)
+            df = normalize(df_raw, store)
+            df["機種"], df["date"] = machine, date
+            df = df[[c for c in df.columns if c in table.c.keys()]]
+            if df.empty:
+                continue
+
+            # ⑤ UPSERT
+            stmt = (
+                pg_insert(table)
+                .values(df.to_dict("records"))
+                .on_conflict_do_nothing()
+            )
+            with eng.begin() as conn:
+                conn.execute(stmt)
+
+            bar.progress(i / len(files))
+
+        st.success("インポート完了！")
+
 # ========================= 可視化モード =========================
 if mode == "📊 可視化":
     st.header("DB 可視化")
