@@ -33,6 +33,7 @@ def engine():
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
+
 # ---------- 店舗ごとの列名マッピング ----------
 COLUMN_MAP = {
     "メッセ武蔵境": {
@@ -178,12 +179,12 @@ if mode == "📥 データ取り込み":
 
 # ========== 可視化モード ==========
 if mode == "📊 可視化":
-    st.header("DB 可視化 & 集計")
-    # 店舗リスト取得
+    st.header("DB 可視化")
+
+    # 1) 店舗選択 -------------------------------------------------------------
     with eng.connect() as conn:
         stores = [r[0] for r in conn.execute(sa.text(
             "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
-
     if not stores:
         st.info("まず取り込みモードでデータを入れてください。")
         st.stop()
@@ -191,37 +192,53 @@ if mode == "📊 可視化":
     store_sel = st.selectbox("店舗", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
 
-    # 日付レンジ
+    # 2) 日付レンジ -----------------------------------------------------------
     d1, d2 = st.columns(2)
-    vis_start = d1.date_input("表示開始日", value=dt.date(2025, 1, 1))
-    vis_end   = d2.date_input("表示終了日", value=dt.date.today())
+    vis_start = d1.date_input("開始日", value=dt.date(2025, 1, 1))
+    vis_end   = d2.date_input("終了日", value=dt.date.today())
 
-    # データ取得
-    sql = sa.select(tbl).where(tbl.c.date.between(vis_start, vis_end))
+    base_query = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
+    with eng.connect() as conn:
+        machines = [r[0] for r in conn.execute(base_query)]
+
+    if not machines:
+        st.warning("指定期間にデータがありません")
+        st.stop()
+
+    # 3) 機種選択 -------------------------------------------------------------
+    machine_sel = st.selectbox("機種", machines)
+
+    # 4) 台番号リスト ---------------------------------------------------------
+    slot_query = sa.select(tbl.c.台番号).where(
+        tbl.c.機種 == machine_sel,
+        tbl.c.date.between(vis_start, vis_end)
+    ).distinct().order_by(tbl.c.台番号)
+    with eng.connect() as conn:
+        slots = [r[0] for r in conn.execute(slot_query)]
+
+    if not slots:
+        st.warning("この機種のデータがありません")
+        st.stop()
+
+    slot_sel = st.selectbox("台番号", slots)
+
+    # 5) データ取得 -----------------------------------------------------------
+    sql = sa.select(tbl).where(
+        tbl.c.date.between(vis_start, vis_end),
+        tbl.c.機種 == machine_sel,
+        tbl.c.台番号 == slot_sel
+    ).order_by(tbl.c.date)
     df_show = pd.read_sql(sql, eng)
 
     if df_show.empty:
-        st.warning("該当期間にデータがありません")
+        st.warning("データがありません")
         st.stop()
 
-    # ---------- 折れ線グラフ：合成確率そのもの ----------
-    st.subheader("📈 合成確率（台番号別）")
-    line_src = df_show[["date", "台番号", "合成確率"]].dropna()
-
-    line_chart = alt.Chart(line_src).mark_line().encode(
+    # 6) 折れ線グラフ（合成確率そのもの） ------------------------------------
+    st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
+    line_chart = alt.Chart(df_show).mark_line().encode(
         x="date:T",
         y=alt.Y("合成確率:Q", axis=alt.Axis(format=".2%")),
-        color="台番号:N",
-        tooltip=["date", "台番号", alt.Tooltip("合成確率:Q", format=".2%")]
+        tooltip=["date", alt.Tooltip("合成確率:Q", format=".2%")]
     ).properties(height=300)
     st.altair_chart(line_chart, use_container_width=True)
-
-    # ---------- ヒートマップ ----------
-    st.subheader("🗺️ 日付×台番号 ヒートマップ（BB回数）")
-    heat = alt.Chart(df_show).mark_rect().encode(
-        x="date:T",
-        y="台番号:O",
-        color=alt.Color("BB回数:Q", scale=alt.Scale(scheme="greenblue")),
-        tooltip=["date", "台番号", "BB回数"]
-    ).properties(height=400)
-    st.altair_chart(heat, use_container_width=True)
