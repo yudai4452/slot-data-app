@@ -184,24 +184,17 @@ if mode == "📊 可視化":
     if df.empty:
         st.warning("データがありません"); st.stop()
 
-    # 表示形式選択（修正済み）
-    fmt = st.radio("表示形式", ("小数 (0.003)", "1/◯ 表示"), horizontal=True)
-
+    # === 表示処理: 常に 1/◯ 表示 ===
     df_plot = df.copy()
-    df_plot["台番号"] = df_plot["台番号"].astype("Int64")  # 台番号の小数表示防止
+    df_plot["台番号"] = df_plot["台番号"].astype("Int64")
+    df_plot["plot_val"] = df_plot["合成確率"]
 
-    if fmt == "1/◯ 表示":
-        df_plot["plot_val"] = df_plot["合成確率"]
-        y_axis = alt.Axis(
-            title="1 / 合成確率",
-            format=".4f",
-            labelExpr='"1/" + format(round(1 / datum.value), "d")'
-        )
-        tooltip_fmt = ".4f"
-    else:
-        df_plot["plot_val"] = df_plot["合成確率"]
-        y_axis = alt.Axis(title="合成確率 (小数)")
-        tooltip_fmt = ".4f"
+    y_axis = alt.Axis(
+        title="1 / 合成確率",
+        format=".4f",
+        labelExpr='"1/" + format(round(1 / datum.value), "d")'
+    )
+    tooltip_fmt = ".4f"
 
     st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
     chart = alt.Chart(df_plot).mark_line().encode(
