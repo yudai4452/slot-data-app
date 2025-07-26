@@ -78,9 +78,9 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = (
                 df[col].astype(str)
-                      .str.extract(r"(\d+\.?\d*)")        # 300 を取り出す
+                      .str.split("/", expand=True)[1]
                       .astype(float)
-                      .rdiv(1)                            # 1 / 300
+                      .rdiv(1.0)
             )
 
     # ③ 整数列を Int64 型に
