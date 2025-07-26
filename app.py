@@ -33,7 +33,6 @@ def engine():
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
-
 # ---------- 店舗ごとの列名マッピング ----------
 COLUMN_MAP = {
     "メッセ武蔵境": {
@@ -146,11 +145,11 @@ def parse_meta(path: str):
     date = dt.date.fromisoformat(parts[-1][-14:-4])
     return store, machine, date
 
-# ========== 可視化モード ==========
+# ========================= 可視化モード =========================
 if mode == "📊 可視化":
     st.header("DB 可視化")
 
-    # 1) 店舗選択 -------------------------------------------------------------
+    # 1) 店舗リスト
     with eng.connect() as conn:
         stores = [r[0] for r in conn.execute(sa.text(
             "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
@@ -161,57 +160,48 @@ if mode == "📊 可視化":
     store_sel = st.selectbox("店舗", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
 
-    # 2) 日付レンジ -----------------------------------------------------------
-    d1, d2 = st.columns(2)
-    vis_start = d1.date_input("開始日", value=dt.date(2025, 1, 1))
-    vis_end   = d2.date_input("終了日", value=dt.date.today())
+    # 2) 日付レンジ
+    c1, c2 = st.columns(2)
+    vis_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
+    vis_end   = c2.date_input("終了日", value=dt.date.today())
 
-    base_query = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
+    # 3) 機種選択
+    q_machine = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
     with eng.connect() as conn:
-        machines = [r[0] for r in conn.execute(base_query)]
-
+        machines = [r[0] for r in conn.execute(q_machine)]
     if not machines:
-        st.warning("指定期間にデータがありません")
-        st.stop()
-
-    # 3) 機種選択 -------------------------------------------------------------
+        st.warning("指定期間にデータがありません"); st.stop()
     machine_sel = st.selectbox("機種", machines)
 
-    # 4) 台番号リスト ---------------------------------------------------------
-    slot_query = sa.select(tbl.c.台番号).where(
+    # 4) 台番号選択
+    q_slot = sa.select(tbl.c.台番号).where(
         tbl.c.機種 == machine_sel,
         tbl.c.date.between(vis_start, vis_end)
     ).distinct().order_by(tbl.c.台番号)
     with eng.connect() as conn:
-        slots = [r[0] for r in conn.execute(slot_query)]
-
+        slots = [r[0] for r in conn.execute(q_slot)]
     if not slots:
-        st.warning("この機種のデータがありません")
-        st.stop()
-
+        st.warning("この機種のデータがありません"); st.stop()
     slot_sel = st.selectbox("台番号", slots)
 
-    # 5) データ取得 -----------------------------------------------------------
+    # 5) データ取得
     sql = sa.select(tbl).where(
         tbl.c.date.between(vis_start, vis_end),
         tbl.c.機種 == machine_sel,
         tbl.c.台番号 == slot_sel
     ).order_by(tbl.c.date)
-    df_show = pd.read_sql(sql, eng)
+    df = pd.read_sql(sql, eng)
+    if df.empty:
+        st.warning("データがありません"); st.stop()
 
-    if df_show.empty:
-        st.warning("データがありません")
-        st.stop()
-
-    # 6) 表示形式選択 -------------------------------------------------
+    # 6) 表示形式選択
     fmt = st.radio("表示形式", ("小数 (0.003)", "% 表示", "1/◯ 表示"), horizontal=True)
 
-    # 表示用列を作成
-    df_plot = df_show.copy()
+    df_plot = df.copy()
     if fmt == "% 表示":
-        df_plot["plot_val"] = df_plot["合成確率"]
-        y_axis = alt.Axis(format=".2%", title="合成確率 (%)")
-        tooltip_fmt = ".2%"
+        df_plot["plot_val"] = df_plot["合成確率"] * 100     # 0-1 → 0-100
+        y_axis = alt.Axis(title="合成確率 (%)")
+        tooltip_fmt = ".2f"
     elif fmt == "1/◯ 表示":
         df_plot["plot_val"] = df_plot["合成確率"].replace(0, pd.NA).rdiv(1)
         y_axis = alt.Axis(title="1 / 合成確率")
@@ -221,12 +211,12 @@ if mode == "📊 可視化":
         y_axis = alt.Axis(title="合成確率 (小数)")
         tooltip_fmt = ".4f"
 
-    # 7) 折れ線グラフ ---------------------------------------------------------
+    # 7) 折れ線グラフ
     st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
-    line_chart = alt.Chart(df_plot).mark_line().encode(
+    chart = alt.Chart(df_plot).mark_line().encode(
         x="date:T",
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
     ).properties(height=300)
-    st.altair_chart(line_chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 
