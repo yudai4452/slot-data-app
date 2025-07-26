@@ -146,37 +146,6 @@ def parse_meta(path: str):
     date = dt.date.fromisoformat(parts[-1][-14:-4])
     return store, machine, date
 
-# ========== 取り込みモード ==========
-if mode == "📥 データ取り込み":
-    st.header("Google Drive → Postgres インポート")
-    folder_id = st.text_input("Google Drive フォルダ ID")
-    col_s, col_e = st.columns(2)
-    import_start = col_s.date_input("取り込み開始日", value=dt.date(2025, 1, 1))
-    import_end   = col_e.date_input("取り込み終了日", value=dt.date.today())
-
-    if st.button("🚀 取り込み実行") and folder_id:
-        files = [f for f in list_csv_recursive(folder_id)
-                 if import_start <= parse_meta(f["path"])[2] <= import_end]
-        st.write(f"🔍 対象 CSV: {len(files)} 件")
-        bar = st.progress(0.0)
-        for i, f in enumerate(files, 1):
-            raw = drive.files().get_media(fileId=f["id"]).execute()
-            df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis")
-            store, machine, date = parse_meta(f["path"])
-            if store not in COLUMN_MAP:
-                st.warning(f"マッピング未定義: {store} をスキップ"); continue
-            table = ensure_store_table(store)
-            df = normalize(df_raw, store)
-            df["機種"], df["date"] = machine, date
-            valid = set(table.c.keys())
-            df = df[[c for c in df.columns if c in valid]]
-            if df.empty: continue
-            stmt = (pg_insert(table).values(df.to_dict("records")).on_conflict_do_nothing())
-            with eng.begin() as conn:
-                conn.execute(stmt)
-            bar.progress(i/len(files))
-        st.success("インポート完了！")
-
 # ========== 可視化モード ==========
 if mode == "📊 可視化":
     st.header("DB 可視化")
@@ -234,11 +203,30 @@ if mode == "📊 可視化":
         st.warning("データがありません")
         st.stop()
 
-    # 6) 折れ線グラフ（合成確率そのもの） ------------------------------------
+    # 6) 表示形式選択 -------------------------------------------------
+    fmt = st.radio("表示形式", ("小数 (0.003)", "% 表示", "1/◯ 表示"), horizontal=True)
+
+    # 表示用列を作成
+    df_plot = df_show.copy()
+    if fmt == "% 表示":
+        df_plot["plot_val"] = df_plot["合成確率"]
+        y_axis = alt.Axis(format=".2%", title="合成確率 (%)")
+        tooltip_fmt = ".2%"
+    elif fmt == "1/◯ 表示":
+        df_plot["plot_val"] = df_plot["合成確率"].replace(0, pd.NA).rdiv(1)
+        y_axis = alt.Axis(title="1 / 合成確率")
+        tooltip_fmt = ".0f"
+    else:  # 小数
+        df_plot["plot_val"] = df_plot["合成確率"]
+        y_axis = alt.Axis(title="合成確率 (小数)")
+        tooltip_fmt = ".4f"
+
+    # 7) 折れ線グラフ ---------------------------------------------------------
     st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
-    line_chart = alt.Chart(df_show).mark_line().encode(
+    line_chart = alt.Chart(df_plot).mark_line().encode(
         x="date:T",
-        y=alt.Y("合成確率:Q", axis=alt.Axis(format=".2%")),
-        tooltip=["date", alt.Tooltip("合成確率:Q", format=".2%")]
+        y=alt.Y("plot_val:Q", axis=y_axis),
+        tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
     ).properties(height=300)
     st.altair_chart(line_chart, use_container_width=True)
+
