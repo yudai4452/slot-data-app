@@ -33,9 +33,117 @@ def engine():
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
-# ---------- COLUMN_MAP, list_csv_recursive, normalize, ensure_store_table, parse_meta ----------
-# (※ 既存の関数は変更なしでそのまま貼り付け)
-# ... <中略: 前バージョンの関数ブロックをそのまま保持> ...
+# ---------- 店舗ごとの列名マッピング ----------
+COLUMN_MAP = {
+    "メッセ武蔵境": {
+        "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
+        "BB回数":"BB回数","RB回数":"RB回数","ART回数":"ART回数","最大持ち玉":"最大持玉",
+        "BB確率":"BB確率","RB確率":"RB確率","ART確率":"ART確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート",
+    },
+    "ジャンジャンマールゴット分倍河原":{
+        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
+        "最大持ち玉":"最大持玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    },
+    "プレゴ立川":{
+        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
+        "最大差玉":"最大差玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
+        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    },
+}
+
+# ---------- UTILS ----------
+def list_csv_recursive(folder_id: str):
+    """サブフォルダを含め .csv を列挙し 'path' を付ける"""
+    all_files, queue = [], [(folder_id, "")]          # (folder_id, 現在のパス)
+    while queue:
+        fid, cur = queue.pop()
+        res = drive.files().list(
+            q=f"'{fid}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+            pageSize=1000, supportsAllDrives=True).execute()
+        for f in res.get("files", []):
+            if f["mimeType"] == "application/vnd.google-apps.folder":
+                queue.append((f["id"], f"{cur}/{f['name']}"))
+            elif f["name"].lower().endswith(".csv"):
+                all_files.append({**f, "path": f"{cur}/{f['name']}"})  # ★ここ★
+    return all_files
+
+
+def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
+    """
+    ❶ 列名を統一
+    ❷ “1/n” → 1÷n、小数はそのまま、“1/0” は 0、空欄は NaN
+    ❸ 整数列を Int64 で整形
+    """
+    # ❶ 列名を COLUMN_MAP でそろえる
+    df = df_raw.rename(columns=COLUMN_MAP[store])
+
+    # ❷ 確率列を float へ変換
+    prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
+    for col in prob_cols:
+        if col not in df.columns:
+            continue
+
+        ser = df[col].astype(str)
+        mask_div = ser.str.contains("/")
+
+        # --- “1/n” 形式 ---
+        if mask_div.any():
+            denom = (
+                ser[mask_div]
+                  .str.split("/", expand=True)[1]    # “1/300” → “300”
+                  .astype(float)
+            )
+            df.loc[mask_div, col] = (
+                denom.where(denom != 0, pd.NA)       # 分母 0 → NaN
+                     .rdiv(1.0)                      # 1 / n
+                     .fillna(0)                      # NaN (1/0) を 0
+            )
+
+        # --- 小数表記や空欄 ---
+        df.loc[~mask_div, col] = pd.to_numeric(
+            ser[~mask_div], errors="coerce"          # 空欄・"--" → NaN
+        )
+
+        df[col] = df[col].astype(float)
+
+    # ❸ 整数列を Int64 型で整形
+    int_cols = [
+        "台番号", "累計スタート", "スタート回数",
+        "BB回数", "RB回数", "ART回数",
+        "最大持ち玉", "最大差玉", "前日最終スタート",
+    ]
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
+    return df
+
+def ensure_store_table(store: str):
+    safe = "slot_" + store.replace(" ", "_")
+    meta = sa.MetaData()
+    if not eng.dialect.has_table(eng.connect(), safe):
+        cols = [
+            sa.Column("date", sa.Date),
+            sa.Column("機種", sa.Text),
+        ]
+        for col in COLUMN_MAP[store].values():
+            cols.append(sa.Column(col, sa.Double, nullable=True))
+        cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
+        sa.Table(safe, meta, *cols)
+        meta.create_all(eng)
+    return sa.Table(safe, meta, autoload_with=eng)
+
+def parse_meta(path: str):
+    # 例: データ/メッセ武蔵境/マイジャグラーV/slot_machine_data_2025-07-19.csv
+    parts = path.strip("/").split("/")
+    if len(parts) < 3:
+        raise ValueError(f"path 形式が想定外: {path}")
+    store, machine = parts[-3], parts[-2]
+    date = dt.date.fromisoformat(parts[-1][-14:-4])
+    return store, machine, date
 
 # ========== 取り込みモード ==========
 if mode == "📥 データ取り込み":
@@ -96,15 +204,10 @@ if mode == "📊 可視化":
         st.warning("該当期間にデータがありません")
         st.stop()
 
-    # ---------- 簡易サマリー ----------
-    st.subheader("📊 サマリー")
-    col_a, col_b = st.columns(2)
-    col_a.metric("平均合成確率", f"{df_show['合成確率'].mean():.3%}")
-    col_b.metric("総BB回数", int(df_show['BB回数'].sum()))
-
-    # ---------- 折れ線グラフ ----------
+    # ---------- 折れ線グラフ ---------- ----------
     st.subheader("📈 合成確率（台番号別）")
-    df_line = df_show.pivot(index="date", columns="台番号", values="合成確率")
+    df_show["合成分母"] = df_show["合成確率"].replace(0, pd.NA).rdiv(1)
+    df_line = df_show.pivot(index="date", columns="台番号", values="合成分母")
     st.line_chart(df_line)
 
     # ---------- ヒートマップ ----------
