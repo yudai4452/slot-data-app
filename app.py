@@ -199,9 +199,15 @@ if mode == "📊 可視化":
     tooltip_fmt = ".4f"
 
     st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
-    chart = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
+    chart = alt.Chart(df_plot).mark_line(strokeWidth=3).encode(
+        x=alt.X("date:T", title="日付"),
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
-    ).properties(height=300)
+    ).properties(height=500).configure_axis(
+        labelFontSize=14,
+        titleFontSize=16
+    ).configure_title(
+        fontSize=18
+    )
     st.altair_chart(chart, use_container_width=True)
+
