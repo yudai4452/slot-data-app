@@ -186,22 +186,48 @@ if mode == "📊 可視化":
     if df.empty:
         st.warning("データがありません"); st.stop()
 
-    # === 表示処理: 常に 1/◯ 表示 ===
-    df_plot = df.copy()
-    df_plot["台番号"] = df_plot["台番号"].astype("Int64")
-    df_plot["plot_val"] = df_plot["合成確率"]
-
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr='"1/" + format(round(1 / datum.value), "d")'
-    )
-    tooltip_fmt = ".4f"
-
-    st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
-    chart = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
-        y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
-    ).properties(height=300)
-    st.altair_chart(chart, use_container_width=True)
+        # === 表示処理: 常に 1/◯ 表示 ===
+        df_plot = df.copy()
+        df_plot["台番号"] = df_plot["台番号"].astype("Int64")
+        df_plot["plot_val"] = df_plot["合成確率"].fillna(0)
+    
+        y_axis = alt.Axis(
+            title="合成確率 (1/◯)",
+            format=".4f",
+            labelExpr='"1/" + format(round(1 / datum.value), "d") if datum.value > 0 else "0"'
+        )
+        tooltip_fmt = ".4f"
+    
+        st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
+        chart = alt.Chart(df_plot).mark_line().encode(
+            x="date:T",
+            y=alt.Y("plot_val:Q", axis=y_axis, scale=alt.Scale(domain=[0, df_plot['plot_val'].max() * 1.1])),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("plot_val:Q", title="確率", format=tooltip_fmt),
+            ],
+        ).properties(height=400)
+        st.altair_chart(chart, use_container_width=True)
+    
+        # === 平均値プロット: 全台番号平均 ===
+        sql_avg = sa.select(
+            tbl.c.date,
+            sa.func.avg(tbl.c.合成確率).label("avg_prob")
+        ).where(
+            tbl.c.date.between(vis_start, vis_end),
+            tbl.c.機種 == machine_sel
+        ).group_by(tbl.c.date).order_by(tbl.c.date)
+    
+        df_avg = pd.read_sql(sql_avg, eng)
+        if not df_avg.empty:
+            df_avg["plot_val"] = df_avg["avg_prob"].fillna(0)
+            st.subheader(f"📊 合成確率（全台平均）| {machine_sel}")
+            avg_chart = alt.Chart(df_avg).mark_line(color="orange").encode(
+                x="date:T",
+                y=alt.Y("plot_val:Q", axis=y_axis, scale=alt.Scale(domain=[0, df_avg['plot_val'].max() * 1.1])),
+                tooltip=[
+                    alt.Tooltip("date:T", title="日付"),
+                    alt.Tooltip("plot_val:Q", title="平均確率", format=tooltip_fmt),
+                ],
+            ).properties(height=300)
+            st.altair_chart(avg_chart, use_container_width=True)
