@@ -119,7 +119,7 @@ if mode == "📥 データ取り込み":
     # フォルダID入力欄（上記から自動反映）
     folder_id = st.text_input("Google Drive フォルダ ID", value=default_folder_id)
     c1, c2 = st.columns(2)
-    imp_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
+    imp_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
     imp_end   = c2.date_input("終了日", value=dt.date.today())
 
     if st.button("🚀 インポート実行", disabled=not folder_id):
