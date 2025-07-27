@@ -7,7 +7,7 @@ import altair as alt
 
 st.set_page_config(page_title="Slot Manager", layout="wide")
 mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"))
-st.title("🍏 Slot Data Manager & Visualizer")
+st.title("🎰 Slot Data Manager & Visualizer")
 
 SA_INFO = st.secrets["gcp_service_account"]
 PG_CFG  = st.secrets["connections"]["slot_db"]
@@ -25,27 +25,6 @@ def engine():
            f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}?sslmode=require")
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
-
-COLUMN_MAP = {
-    "メッセ武蔵境": {
-        "台番号":"台番号"," スタート回数":"スタート回数"," 累計スタート":"累計スタート",
-        "BB回数":"BB回数","RB回数":"RB回数","ART回数":"ART回数"," 最大持ち玉":"最大持玉",
-        "BB確率":"BB確率","RB確率":"RB確率","ART確率":"ART確率"," 合成確率":"合成確率",
-        " 前日最終スタート":"前日最終スタート",
-    },
-    "ジャンジャンマールゴット分倍沿原":{
-        "台番号":"台番号"," 累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        " 最大持ち玉":"最大持玉","BB確率":"BB確率","RB確率":"RB確率"," 合成確率":"合成確率",
-        " 前日最終スタート":"前日最終スタート"," スタート回数":"スタート回数",
-    },
-    "プレゴ立川":{
-        "台番号":"台番号"," 累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        " 最大差玉":"最大差玉","BB確率":"BB確率","RB確率":"RB確率"," 合成確率":"合成確率",
-        " 前日最終スタート":"前日最終スタート"," スタート回数":"スタート回数",
-    },
-}
-
-# ...（list_csv_recursive, normalize, ensure_store_table, parse_meta などは元のまま省略）
 
 # ========================= 可視化モード =========================
 if mode == "📊 可視化":
@@ -72,50 +51,53 @@ if mode == "📊 可視化":
         st.warning("指定期間にデータがありません"); st.stop()
     machine_sel = st.selectbox("機種", machines)
 
-    sql = sa.select(tbl).where(
+    sql_all = sa.select(tbl).where(
         tbl.c.date.between(vis_start, vis_end),
         tbl.c.機種 == machine_sel
-    ).order_by(tbl.c.date)
-    df = pd.read_sql(sql, eng)
-    if df.empty:
+    ).order_by(tbl.c.date, tbl.c.台番号)
+    df_all = pd.read_sql(sql_all, eng)
+    if df_all.empty:
         st.warning("データがありません"); st.stop()
 
-    st.subheader(f"📈 合成確率 | {machine_sel}")
-    view_mode = st.radio("表示モード", (" 全台番号をまとめて表示", " 台番号を選んで表示"), horizontal=True)
+    df_all["台番号"] = df_all["台番号"].astype("Int64")
+    df_all["plot_val"] = df_all["合成確率"]
 
-    df["台番号"] = df["台番号"].astype("Int64")
-    df["plot_val"] = df["合成確率"]
+    # 合成確率平均を日付単位で算出
+    df_avg = df_all.groupby("date", as_index=False)["plot_val"].mean()
 
     y_axis = alt.Axis(
-        title="合成確率",
+        title="合成確率の平均",
         format=".4f",
         labelExpr='datum.value == 0 ? "0" : "1/" + format(round(1 / datum.value), "d")'
     )
     tooltip_fmt = ".4f"
 
-    if view_mode == " 全台番号をまとめて表示":
-        chart = alt.Chart(df).mark_line(strokeWidth=3).encode(
-            x=alt.X("date:T", title="日付"),
-            y=alt.Y("plot_val:Q", axis=y_axis),
-            color=alt.Color("台番号:N", title="台番号"),
-            tooltip=["date", "台番号", alt.Tooltip("plot_val:Q", title="合成確率", format=tooltip_fmt)]
-        ).properties(height=800).configure_axis(
-            labelFontSize=14,
-            titleFontSize=16
-        )
-    else:
-        slot_sel = st.selectbox("台番号", sorted(df["台番号"].dropna().unique()))
-        df_sel = df[df["台番号"] == slot_sel]
-        if df_sel.empty:
-            st.warning("データがありません"); st.stop()
+    st.subheader(f"📈 合成確率の平均 | {machine_sel}")
+    chart_avg = alt.Chart(df_avg).mark_line(strokeWidth=3).encode(
+        x=alt.X("date:T", title="日付"),
+        y=alt.Y("plot_val:Q", axis=y_axis),
+        tooltip=["date", alt.Tooltip("plot_val:Q", title="平均合成確率", format=tooltip_fmt)]
+    ).properties(height=800).configure_axis(
+        labelFontSize=14,
+        titleFontSize=16
+    )
+    st.altair_chart(chart_avg, use_container_width=True)
 
-        chart = alt.Chart(df_sel).mark_line(strokeWidth=3).encode(
-            x=alt.X("date:T", title="日付"),
-            y=alt.Y("plot_val:Q", axis=y_axis),
-            tooltip=["date", alt.Tooltip("plot_val:Q", title="合成確率", format=tooltip_fmt)]
-        ).properties(height=800).configure_axis(
-            labelFontSize=14,
-            titleFontSize=16
-        )
+    st.subheader(f"📈 台番号別 合成確率 | {machine_sel}")
+    slots = sorted(df_all["台番号"].dropna().unique())
+    slot_sel = st.selectbox("台番号", slots)
+    df_slot = df_all[df_all["台番号"] == slot_sel]
+    if df_slot.empty:
+        st.warning("データがありません"); st.stop()
 
-    st.altair_chart(chart, use_container_width=True)
+    chart_slot = alt.Chart(df_slot).mark_line(strokeWidth=3).encode(
+        x=alt.X("date:T", title="日付"),
+        y=alt.Y("plot_val:Q", axis=y_axis),
+        tooltip=["date", alt.Tooltip("plot_val:Q", title="合成確率", format=tooltip_fmt)]
+    ).properties(height=800).configure_axis(
+        labelFontSize=14,
+        titleFontSize=16
+    )
+    st.altair_chart(chart_slot, use_container_width=True)
+
+    st.caption(f"全台番号: {', '.join(map(str, slots))}")
