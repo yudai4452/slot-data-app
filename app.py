@@ -194,7 +194,7 @@ if mode == "📊 可視化":
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
-        labelExpr='"1/" + format(round(1 / datum.value), "d")'
+        labelExpr='datum.value == 0 ? "0" : "1/" + format(round(1 / datum.value), "d")'
     )
     tooltip_fmt = ".4f"
 
