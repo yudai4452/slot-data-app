@@ -164,7 +164,7 @@ if mode == "📊 可視化":
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
+    vis_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
     vis_end   = c2.date_input("終了日", value=dt.date.today())
 
     q_machine = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
