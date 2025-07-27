@@ -153,6 +153,7 @@ if mode == "📥 データ取り込み":
 if mode == "📊 可視化":
     st.header("DB 可視化")
 
+    # テーブル一覧取得
     with eng.connect() as conn:
         stores = [r[0] for r in conn.execute(sa.text(
             "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
@@ -163,10 +164,12 @@ if mode == "📊 可視化":
     store_sel = st.selectbox("店舗", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
 
+    # 日付範囲
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
+    vis_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
     vis_end   = c2.date_input("終了日", value=dt.date.today())
 
+    # 機種選択
     q_machine = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
     with eng.connect() as conn:
         machines = [r[0] for r in conn.execute(q_machine)]
@@ -174,43 +177,65 @@ if mode == "📊 可視化":
         st.warning("指定期間にデータがありません"); st.stop()
     machine_sel = st.selectbox("機種", machines)
 
+    # 台番号一覧＋全台平均オプション
     q_slot = sa.select(tbl.c.台番号).where(
         tbl.c.機種 == machine_sel,
         tbl.c.date.between(vis_start, vis_end)
     ).distinct().order_by(tbl.c.台番号)
     with eng.connect() as conn:
         slots = [r[0] for r in conn.execute(q_slot)]
-    if not slots:
-        st.warning("この機種のデータがありません"); st.stop()
-
-    slots = [int(s) for s in slots if s is not None]
+    slots = sorted([int(s) for s in slots if s is not None])
+    slots = ["全台平均"] + slots
     slot_sel = st.selectbox("台番号", slots)
 
+    # データ取得
     sql = sa.select(tbl).where(
         tbl.c.date.between(vis_start, vis_end),
         tbl.c.機種 == machine_sel,
-        tbl.c.台番号 == slot_sel
+        # 全台平均なら台番号フィルタをせず、それ以外は絞り込み
+        *( [] if slot_sel == "全台平均" else [tbl.c.台番号 == slot_sel] )
     ).order_by(tbl.c.date)
     df = pd.read_sql(sql, eng)
     if df.empty:
         st.warning("データがありません"); st.stop()
 
-    # === 表示処理: 常に 1/◯ 表示 ===
-    df_plot = df.copy()
-    df_plot["台番号"] = df_plot["台番号"].astype("Int64")
-    df_plot["plot_val"] = df_plot["合成確率"]
+    # プロット用データ整形
+    if slot_sel == "全台平均":
+        df_plot = (
+            df.groupby("date")["合成確率"]
+              .mean()
+              .reset_index()
+              .rename(columns={"合成確率":"plot_val"})
+        )
+        title = f"📈 全台平均 合成確率 | {machine_sel}"
+    else:
+        df_plot = df.copy()
+        df_plot["plot_val"] = df_plot["合成確率"]
+        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
+    # 軸ラベル：値が0のときは"0"、それ以外は1/値の形式
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
-        labelExpr='"1/" + format(round(1 / datum.value), "d")'
+        labelExpr=(
+            "datum.value == 0 ? '0' : "
+            + "'1/' + format(round(1 / datum.value), 'd')"
+        )
     )
     tooltip_fmt = ".4f"
 
-    st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
-    chart = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
-        y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
-    ).properties(height=300)
+    st.subheader(title)
+    chart = (
+        alt.Chart(df_plot)
+           .mark_line()
+           .encode(
+               x="date:T",
+               y=alt.Y("plot_val:Q", axis=y_axis),
+               tooltip=[
+                   "date",
+                   alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)
+               ]
+           )
+           .properties(height=500)  # ここで高さを拡大
+    )
     st.altair_chart(chart, use_container_width=True)
