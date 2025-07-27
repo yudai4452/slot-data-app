@@ -108,7 +108,16 @@ def parse_meta(path: str):
 # ========================= データ取り込み =========================
 if mode == "📥 データ取り込み":
     st.header("Google Drive → Postgres インポート")
-    folder_id = st.text_input("Google Drive フォルダ ID")
+    # フォルダIDのプリセット選択
+    folder_options = {
+        "🧪 テスト用 (1MRQ...qOb8)": "1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8",
+        "🚀 本番用 (1hX8...X7Ynl)": "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"
+    }
+    selected_label = st.selectbox("📂 フォルダタイプを選択", list(folder_options.keys()))
+    default_folder_id = folder_options[selected_label]
+    
+    # フォルダID入力欄（上記から自動反映）
+    folder_id = st.text_input("Google Drive フォルダ ID", value=default_folder_id)
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
     imp_end   = c2.date_input("終了日", value=dt.date.today())
