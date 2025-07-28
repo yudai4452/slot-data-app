@@ -174,7 +174,7 @@ if mode == "📊 可視化":
 
     # 日付範囲
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
+    vis_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
     vis_end   = c2.date_input("終了日", value=dt.date.today())
 
     # 機種選択
