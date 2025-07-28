@@ -8,7 +8,7 @@ import json
 
 # -------- 設定ファイル読み込み --------
 # JSON 構造: 機種名 -> { 設定名: 合成確率(閾値) }
-with open("setting_config.json", encoding="utf-8") as f:
+with open("setting.json", encoding="utf-8") as f:
     setting_map = json.load(f)
 
 st.set_page_config(page_title="Slot Manager", layout="wide")
