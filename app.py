@@ -33,6 +33,36 @@ def engine():
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
+# ========== キャッシュ付き CSV 読み込み＋正規化 ==========
+@st.cache_data
+def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
+    df_raw = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", on_bad_lines="skip")
+    # normalize logic
+    df = df_raw.rename(columns=COLUMN_MAP[store])
+    prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
+    for col in prob_cols:
+        if col not in df.columns:
+            continue
+        ser = df[col].astype(str)
+        mask_div = ser.str.contains("/")
+        if mask_div.any():
+            denom = ser[mask_div].str.split("/", expand=True)[1].astype(float)
+            df.loc[mask_div, col] = denom.where(denom != 0, pd.NA).rdiv(1.0).fillna(0)
+        num = pd.to_numeric(ser[~mask_div], errors="coerce")
+        mask_gt1 = num > 1
+        num.loc[mask_gt1] = 1.0 / num.loc[mask_gt1]
+        df.loc[~mask_div, col] = num
+        df[col] = df[col].astype(float)
+    int_cols = [
+        "台番号", "累計スタート", "スタート回数",
+        "BB回数", "RB回数", "ART回数",
+        "最大持ち玉", "最大差玉", "前日最終スタート",
+    ]
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    return df
+
 COLUMN_MAP = {
     "メッセ武蔵境": {
         "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
@@ -67,31 +97,6 @@ def list_csv_recursive(folder_id: str):
                 all_files.append({**f, "path": f"{cur}/{f['name']}"})
     return all_files
 
-def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
-    df = df_raw.rename(columns=COLUMN_MAP[store])
-    prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
-    for col in prob_cols:
-        if col not in df.columns:
-            continue
-        ser = df[col].astype(str)
-        mask_div = ser.str.contains("/")
-        if mask_div.any():
-            denom = ser[mask_div].str.split("/", expand=True)[1].astype(float)
-            df.loc[mask_div, col] = denom.where(denom != 0, pd.NA).rdiv(1.0).fillna(0)
-        num = pd.to_numeric(ser[~mask_div], errors="coerce")
-        mask_gt1 = num > 1
-        num.loc[mask_gt1] = 1.0 / num.loc[mask_gt1]
-        df.loc[~mask_div, col] = num
-        df[col] = df[col].astype(float)
-    int_cols = [
-        "台番号", "累計スタート", "スタート回数",
-        "BB回数", "RB回数", "ART回数",
-        "最大持ち玉", "最大差玉", "前日最終スタート",
-    ]
-    for col in int_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-    return df
 
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
@@ -122,8 +127,6 @@ if mode == "📥 データ取り込み":
     }
     selected_label = st.selectbox("📂 フォルダタイプを選択", list(folder_options.keys()))
     default_folder_id = folder_options[selected_label]
-    
-    # フォルダID入力欄（上記から自動反映）
     folder_id = st.text_input("Google Drive フォルダ ID", value=default_folder_id)
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
@@ -136,12 +139,11 @@ if mode == "📥 データ取り込み":
         bar = st.progress(0.0)
         for i, f in enumerate(files, 1):
             raw = drive.files().get_media(fileId=f["id"]).execute()
-            df_raw = pd.read_csv(io.BytesIO(raw), encoding="shift_jis", on_bad_lines="skip")
+            df = load_and_normalize(raw, parse_meta(f["path"])[0])
             store, machine, date = parse_meta(f["path"])
             if store not in COLUMN_MAP:
                 st.warning(f"マッピング未定義: {store} → スキップ"); continue
             table = ensure_store_table(store)
-            df = normalize(df_raw, store)
             df["機種"], df["date"] = machine, date
             df = df[[c for c in df.columns if c in table.c.keys()]]
             if df.empty:
