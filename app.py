@@ -4,6 +4,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import altair as alt
+import json
+
+# -------- 設定ファイル読み込み --------
+# JSON 構造: 機種名 -> { 設定名: 合成確率(閾値) }
+with open("setting_config.json", encoding="utf-8") as f:
+    setting_map = json.load(f)
 
 st.set_page_config(page_title="Slot Manager", layout="wide")
 mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"))
@@ -15,7 +21,8 @@ PG_CFG  = st.secrets["connections"]["slot_db"]
 @st.cache_resource
 def gdrive():
     creds = Credentials.from_service_account_info(
-        SA_INFO, scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        SA_INFO, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    )
     return build("drive", "v3", credentials=creds)
 drive = gdrive()
 
@@ -149,17 +156,16 @@ if mode == "📥 データ取り込み":
             bar.progress(i / len(files))
         st.success("インポート完了！")
 
-# ========================= 可視化モード =========================
+# ========== 可視化モード ==========
 if mode == "📊 可視化":
     st.header("DB 可視化")
 
-    # テーブル一覧取得
+    # 店一覧取得
     with eng.connect() as conn:
         stores = [r[0] for r in conn.execute(sa.text(
             "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
     if not stores:
-        st.info("まず取り込みモードでデータを入れてください。")
-        st.stop()
+        st.info("まず取り込みモードでデータを入れてください。"); st.stop()
 
     store_sel = st.selectbox("店舗", stores)
     tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
@@ -177,7 +183,7 @@ if mode == "📊 可視化":
         st.warning("指定期間にデータがありません"); st.stop()
     machine_sel = st.selectbox("機種", machines)
 
-    # 台番号一覧＋全台平均オプション
+    # 台番号＋全台平均
     q_slot = sa.select(tbl.c.台番号).where(
         tbl.c.機種 == machine_sel,
         tbl.c.date.between(vis_start, vis_end)
@@ -189,53 +195,52 @@ if mode == "📊 可視化":
     slot_sel = st.selectbox("台番号", slots)
 
     # データ取得
-    sql = sa.select(tbl).where(
-        tbl.c.date.between(vis_start, vis_end),
-        tbl.c.機種 == machine_sel,
-        # 全台平均なら台番号フィルタをせず、それ以外は絞り込み
-        *( [] if slot_sel == "全台平均" else [tbl.c.台番号 == slot_sel] )
-    ).order_by(tbl.c.date)
+    conditions = [tbl.c.date.between(vis_start, vis_end), tbl.c.機種 == machine_sel]
+    if slot_sel != "全台平均":
+        conditions.append(tbl.c.台番号 == slot_sel)
+    sql = sa.select(tbl).where(*conditions).order_by(tbl.c.date)
     df = pd.read_sql(sql, eng)
     if df.empty:
         st.warning("データがありません"); st.stop()
 
-    # プロット用データ整形
+    # プロット用整形
     if slot_sel == "全台平均":
-        df_plot = (
-            df.groupby("date")["合成確率"]
-              .mean()
-              .reset_index()
-              .rename(columns={"合成確率":"plot_val"})
-        )
+        df_plot = df.groupby("date")["合成確率"].mean().reset_index().rename(columns={"合成確率":"plot_val"})
         title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
         df_plot = df.copy()
         df_plot["plot_val"] = df_plot["合成確率"]
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-    # 軸ラベル：値が0のときは"0"、それ以外は1/値の形式
+    # 閾値
+    thresholds = setting_map.get(machine_sel, {})
+    df_rules = pd.DataFrame([{"setting": name, "value": val} for name, val in thresholds.items()])
+
+    # 軸設定
     y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr=(
-            "datum.value == 0 ? '0' : "
-            + "'1/' + format(round(1 / datum.value), 'd')"
-        )
+        title="合成確率", format=".4f",
+        labelExpr=("datum.value == 0 ? '0' : '1/' + format(round(1 / datum.value), 'd')")
     )
     tooltip_fmt = ".4f"
 
     st.subheader(title)
-    chart = (
+    base = (
         alt.Chart(df_plot)
            .mark_line()
            .encode(
                x="date:T",
                y=alt.Y("plot_val:Q", axis=y_axis),
-               tooltip=[
-                   "date",
-                   alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)
-               ]
+               tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=tooltip_fmt)]
            )
-           .properties(height=500)  # ここで高さを拡大
+           .properties(height=500)
     )
-    st.altair_chart(chart, use_container_width=True)
+    rules = (
+        alt.Chart(df_rules)
+           .mark_rule(strokeDash=[4,2])
+           .encode(
+               y="value:Q",
+               color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"))
+           )
+    )
+    st.altair_chart(base + rules, use_container_width=True)
+
