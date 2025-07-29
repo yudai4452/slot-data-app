@@ -163,8 +163,7 @@ def ensure_store_table(store: str) -> sa.Table:
         raise
 
 # -------- バルクCOPY --------
-from io import StringIO
- def bulk_copy_dataframe(df: pd.DataFrame, tbl: sa.Table):
+def bulk_copy_dataframe(df: pd.DataFrame, tbl: sa.Table):
     try:
         buf = StringIO()
         df.to_csv(buf, index=False, header=False)
