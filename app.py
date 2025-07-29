@@ -33,6 +33,11 @@ def engine():
     return sa.create_engine(url, pool_pre_ping=True)
 eng = engine()
 
+@st.cache_resource
+def get_table(table_name: str) -> sa.Table:
+    meta = sa.MetaData()
+    return sa.Table(table_name, meta, autoload_with=eng)
+
 # ========== キャッシュ付き CSV 読み込み＋正規化 ==========
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
@@ -161,47 +166,39 @@ if mode == "📥 データ取り込み":
 # ========== 可視化モード ==========
 if mode == "📊 可視化":
     st.header("DB 可視化")
-
-    # 店一覧取得
-    with eng.connect() as conn:
-        stores = [r[0] for r in conn.execute(sa.text(
-            "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"))]
-    if not stores:
-        st.info("まず取り込みモードでデータを入れてください。"); st.stop()
-
-    store_sel = st.selectbox("店舗", stores)
-    tbl = sa.Table(store_sel, sa.MetaData(), autoload_with=eng)
+    # テーブルオブジェクトをキャッシュから取得
+    table_name = st.selectbox(
+        "テーブル選択", 
+        [r[0] for r in eng.connect().execute(sa.text(
+            "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
+        ))]
+    )
+    tbl = get_table(table_name)
 
     # 日付範囲
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=dt.date(2024, 1, 1))
+    vis_start = c1.date_input("開始日", value=dt.date(2025, 1, 1))
     vis_end   = c2.date_input("終了日", value=dt.date.today())
 
     # 機種選択
-    q_machine = sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
-    with eng.connect() as conn:
-        machines = [r[0] for r in conn.execute(q_machine)]
-    if not machines:
-        st.warning("指定期間にデータがありません"); st.stop()
+    machines = [r[0] for r in eng.connect().execute(
+        sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start, vis_end)).distinct()
+    )]
     machine_sel = st.selectbox("機種", machines)
 
     # 台番号＋全台平均
-    q_slot = sa.select(tbl.c.台番号).where(
-        tbl.c.機種 == machine_sel,
-        tbl.c.date.between(vis_start, vis_end)
-    ).distinct().order_by(tbl.c.台番号)
-    with eng.connect() as conn:
-        slots = [r[0] for r in conn.execute(q_slot)]
-    slots = sorted([int(s) for s in slots if s is not None])
-    slots = ["全台平均"] + slots
-    slot_sel = st.selectbox("台番号", slots)
+    slots = sorted([int(r[0]) for r in eng.connect().execute(
+        sa.select(tbl.c.台番号)
+          .where(tbl.c.機種==machine_sel, tbl.c.date.between(vis_start, vis_end))
+          .distinct()
+          .order_by(tbl.c.台番号)
+    ) if r[0] is not None])
+    slot_sel = st.selectbox("台番号", ["全台平均"] + slots)
 
     # データ取得
-    conditions = [tbl.c.date.between(vis_start, vis_end), tbl.c.機種 == machine_sel]
-    if slot_sel != "全台平均":
-        conditions.append(tbl.c.台番号 == slot_sel)
-    sql = sa.select(tbl).where(*conditions).order_by(tbl.c.date)
-    df = pd.read_sql(sql, eng)
+    cond = [tbl.c.date.between(vis_start, vis_end), tbl.c.機種==machine_sel]
+    if slot_sel != "全台平均": cond.append(tbl.c.台番号==slot_sel)
+    df = pd.read_sql(sa.select(tbl).where(*cond).order_by(tbl.c.date), eng)
     if df.empty:
         st.warning("データがありません"); st.stop()
 
