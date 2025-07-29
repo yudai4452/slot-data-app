@@ -1,8 +1,12 @@
-import io, datetime as dt, pandas as pd, streamlit as st
+import io
+import datetime as dt
+import pandas as pd
+import streamlit as st
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from io import StringIO
 import altair as alt
 import json
 
@@ -28,6 +32,7 @@ def gdrive():
     except Exception as e:
         st.error(f"Drive認証エラー: {e}")
         return None
+
 drive = gdrive()
 
 @st.cache_resource
@@ -41,9 +46,10 @@ def engine():
     except Exception as e:
         st.error(f"DB接続エラー: {e}")
         return None
+
 eng = engine()
 
-# -------- テーブルキャッシュ --------
+# -------- テーブルキャッシュユーティリティ --------
 @st.cache_resource
 def get_table(table_name: str) -> sa.Table:
     try:
@@ -73,15 +79,19 @@ COLUMN_MAP = {
     },
 }
 
-# -------- ファイル列挙 --------
+# -------- CSV 列挙 --------
 def list_csv_recursive(folder_id: str):
     all_files, queue = [], [(folder_id, "")]
     while queue:
         fid, cur = queue.pop()
-        res = drive.files().list(
-            q=f"'{fid}' in parents and trashed=false",
-            fields="files(id,name,mimeType)", pageSize=1000
-        ).execute()
+        try:
+            res = drive.files().list(
+                q=f"'{fid}' in parents and trashed=false",
+                fields="files(id,name,mimeType)", pageSize=1000
+            ).execute()
+        except Exception as e:
+            st.error(f"CSV列挙エラー (フォルダID={fid}): {e}")
+            continue
         for f in res.get("files", []):
             if f["mimeType"] == "application/vnd.google-apps.folder":
                 queue.append((f["id"], f"{cur}/{f['name']}"))
@@ -114,67 +124,124 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 # -------- キャッシュ付き読み込み＋正規化 --------
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    df_raw = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", on_bad_lines="skip")
-    return normalize(df_raw, store)
+    try:
+        df_raw = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", on_bad_lines="skip")
+    except Exception as e:
+        st.error(f"データ読み込みエラー: {e}")
+        return pd.DataFrame()
+    try:
+        return normalize(df_raw, store)
+    except Exception as e:
+        st.error(f"正規化エラー ({store}): {e}")
+        return pd.DataFrame()
 
 # -------- メタ情報解析 --------
 def parse_meta(path: str):
-    parts=path.strip("/").split("/")
-    store,machine,date=parts[-3],parts[-2],dt.date.fromisoformat(parts[-1][-14:-4])
-    return store,machine,date
+    try:
+        parts = path.strip("/").split("/")
+        store, machine, date = parts[-3], parts[-2], dt.date.fromisoformat(parts[-1][-14:-4])
+        return store, machine, date
+    except Exception as e:
+        st.error(f"パス解析エラー ({path}): {e}")
+        raise
 
 # -------- テーブル作成 --------
-def ensure_store_table(store: str):
-    safe="slot_"+store.replace(" ","_")
-    meta=sa.MetaData()
-    if not eng.dialect.has_table(eng.connect(),safe):
-        cols=[sa.Column("date",sa.Date),sa.Column("機種",sa.Text)]
-        for col in COLUMN_MAP[store].values(): cols.append(sa.Column(col,sa.Double,nullable=True))
-        cols.append(sa.PrimaryKeyConstraint("date","機種","台番号"))
-        sa.Table(safe,meta,*cols)
-        meta.create_all(eng)
-    return sa.Table(safe,meta,autoload_with=eng)
+def ensure_store_table(store: str) -> sa.Table:
+    safe = "slot_" + store.replace(" ", "_")
+    meta = sa.MetaData()
+    try:
+        if not eng.dialect.has_table(eng.connect(), safe):
+            cols = [sa.Column("date", sa.Date), sa.Column("機種", sa.Text)]
+            for col in COLUMN_MAP[store].values():
+                cols.append(sa.Column(col, sa.Double, nullable=True))
+            cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
+            sa.Table(safe, meta, *cols)
+            meta.create_all(eng)
+        return sa.Table(safe, meta, autoload_with=eng)
+    except Exception as e:
+        st.error(f"テーブル作成エラー ({store}): {e}")
+        raise
 
-# ========================= データ取り込み =========================
-if mode=="📥 データ取り込み":
-    st.header("Google Drive → Postgres インポート")
-    folder_options={"🧪 テスト用":"1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8","🚀 本番用":"1hX8GQRuDm_E1A1Cu_fZudXL18y8-qOb8"}
-    sel_label=st.selectbox("フォルダタイプ",list(folder_options.keys()))
-    folder_id=st.text_input("Google Drive フォルダ ID",value=folder_options[sel_label])
-    c1,c2=st.columns(2)
-    imp_start=c1.date_input("開始日",dt.date(2024,1,1))
-    imp_end=c2.date_input("終了日",dt.date.today())
-    if st.button("🚀 インポート実行",disabled=not folder_id):
+# -------- バルクCOPY --------
+from io import StringIO
+ def bulk_copy_dataframe(df: pd.DataFrame, tbl: sa.Table):
+    try:
+        buf = StringIO()
+        df.to_csv(buf, index=False, header=False)
+        buf.seek(0)
+        table_name = tbl.name
+        cols = ", ".join(df.columns)
+        sql = f"COPY {table_name} ({cols}) FROM STDIN WITH CSV"
+        conn = eng.raw_connection()
+        cur = conn.cursor()
+        cur.copy_expert(sql, buf)
+        conn.commit()
+    except Exception as e:
+        st.error(f"バルクコピーエラー ({table_name}): {e}")
+    finally:
         try:
-            files=[f for f in list_csv_recursive(folder_id) if imp_start<=parse_meta(f['path'])[2]<=imp_end]
+            cur.close()
+            conn.close()
+        except:
+            pass
+
+# ================= データ取り込み =================
+if mode == "📥 データ取り込み":
+    st.header("Google Drive → Postgres インポート")
+    folder_options = {"🧪 テスト用": "1MRQFPB...", "🚀 本番用": "1hX8GQRu..."}
+    sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
+    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
+    c1, c2 = st.columns(2)
+    imp_start = c1.date_input("開始日", dt.date(2024, 1, 1))
+    imp_end   = c2.date_input("終了日", dt.date.today())
+
+    if st.button("🚀 インポート実行", disabled=not folder_id):
+        try:
+            files = [f for f in list_csv_recursive(folder_id)
+                     if imp_start <= parse_meta(f['path'])[2] <= imp_end]
         except Exception as e:
             st.error(f"ファイル一覧取得エラー: {e}")
             st.stop()
+
         st.write(f"🔍 対象 CSV: **{len(files)} 件**")
-        bar=st.progress(0.0)
-        current_file = st.empty()  # 処理中ファイル名表示用プレースホルダ
-        for i,f in enumerate(files,1):
+        # テーブルキャッシュ
+        tables_map = {}
+        for f in files:
+            try:
+                store, _, _ = parse_meta(f['path'])
+                if store not in tables_map:
+                    tables_map[store] = ensure_store_table(store)
+            except Exception:
+                st.stop()
+
+        bar = st.progress(0.0)
+        current_file = st.empty()
+        for i, f in enumerate(files, 1):
             current_file.text(f"処理中ファイル: {f['path']}")
             try:
-                raw=drive.files().get_media(fileId=f['id']).execute()
-                store,machine,date=parse_meta(f['path'])
-                df=load_and_normalize(raw,store)
-                if df.empty: continue
-                tbl=ensure_store_table(store)
-                df['機種'],df['date']=machine,date
-                df=df[[c for c in df.columns if c in tbl.c.keys()]]
-                stmt=pg_insert(tbl).values(df.to_dict('records')).on_conflict_do_nothing()
-                with eng.begin() as conn: conn.execute(stmt)
+                raw = drive.files().get_media(fileId=f["id"]).execute()
+                store, machine, date = parse_meta(f['path'])
+                tbl = tables_map[store]
+                df = load_and_normalize(raw, store)
+                if df.empty:
+                    continue
+
+                df['機種'], df['date'] = machine, date
+                df = df[[c for c in df.columns if c in tbl.c.keys()]]
+
+                bulk_copy_dataframe(df, tbl)
+
             except Exception as e:
                 st.error(f"{f['path']} 処理エラー: {e}")
-            bar.progress(i/len(files))
-        current_file.text("")  # 処理完了後は消去
+
+            bar.progress(i / len(files))
+
+        current_file.text("")
         st.success("インポート完了！")
 
-# ========================= 可視化モード =========================
-if mode=="📊 可視化":
+# ================= 可視化 =================
+if mode == "📊 可視化":
     st.header("DB 可視化")
-    # テーブル選択
     try:
         tables = [r[0] for r in eng.connect().execute(sa.text(
             "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
@@ -182,68 +249,57 @@ if mode=="📊 可視化":
     except Exception as e:
         st.error(f"テーブル一覧取得エラー: {e}")
         st.stop()
+
     table_name = st.selectbox("テーブル選択", tables)
-    # テーブル取得とエラーハンドリング
-    try:
-        if table_name is None:
-            st.error("テーブルが選択されていません")
-            st.stop()
-        tbl = get_table(table_name)
-    except Exception as e:
-        st.error(f"テーブル取得エラー: {e}")
+    if table_name is None:
+        st.error("テーブルが選択されていません")
         st.stop()
 
-    # 日付レンジ入力
+    try:
+        tbl = get_table(table_name)
+    except Exception:
+        st.stop()
+
     c1, c2 = st.columns(2)
     vis_start = c1.date_input("開始日", dt.date(2024, 1, 1))
     vis_end   = c2.date_input("終了日", dt.date.today())
 
-    # 機種リスト取得（キャッシュ）
-    @st.cache_data
-    def get_machines(table_name: str, start: dt.date, end: dt.date):
-        q = sa.select(tbl.c.機種).where(tbl.c.date.between(start, end)).distinct()
-        return [r[0] for r in eng.connect().execute(q)]
-    machines = get_machines(table_name, vis_start, vis_end)
+    # 機種リスト取得
+    try:
+        machines = get_machines(table_name, vis_start, vis_end)
+    except Exception as e:
+        st.error(f"機種リスト取得エラー: {e}")
+        st.stop()
     machine_sel = st.selectbox("機種選択", machines)
 
-    # 全台平均フラグ
     show_avg = st.checkbox("全台平均を表示")
 
-    # データ取得（キャッシュ）
-    @st.cache_data
-    def get_data(table_name: str, machine: str, start: dt.date, end: dt.date):
-        q = sa.select(tbl).where(
-            tbl.c.機種 == machine,
-            tbl.c.date.between(start, end)
-        ).order_by(tbl.c.date)
-        return pd.read_sql(q, eng)
-    df = get_data(table_name, machine_sel, vis_start, vis_end)
+    # データ取得
+    try:
+        df = get_data(table_name, machine_sel, vis_start, vis_end)
+    except Exception as e:
+        st.error(f"データ取得エラー: {e}")
+        st.stop()
     if df.empty:
         st.warning("データがありません")
         st.stop()
 
-    # プロット用整形
     if show_avg:
         df_plot = df.groupby("date")["合成確率"].mean().reset_index().rename(columns={"合成確率":"plot_val"})
         title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
-        @st.cache_data
-        def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date):
-            q = sa.select(tbl.c.台番号).where(
-                tbl.c.機種 == machine,
-                tbl.c.date.between(start, end)
-            ).distinct().order_by(tbl.c.台番号)
-            return [int(r[0]) for r in eng.connect().execute(q) if r[0] is not None]
-        slots = get_slots(table_name, machine_sel, vis_start, vis_end)
+        try:
+            slots = get_slots(table_name, machine_sel, vis_start, vis_end)
+        except Exception as e:
+            st.error(f"台番号リスト取得エラー: {e}")
+            st.stop()
         slot_sel = st.selectbox("台番号", slots)
         df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率":"plot_val"})
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-    # 閾値ライン作成
     thresholds = setting_map.get(machine_sel, {})
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()])
 
-    # 凡例トグル※Altair
     legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
     y_axis = alt.Axis(
         title="合成確率",
@@ -265,7 +321,7 @@ if mode=="📊 可視化":
         .mark_rule(strokeDash=[4,2])
         .encode(
             y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"), scale=alt.Scale(scheme="category10")),
+            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
         )
         .add_selection(legend_sel)
