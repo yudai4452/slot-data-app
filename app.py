@@ -199,15 +199,23 @@ if mode=="📊 可視化":
         st.warning("データがありません")
         st.stop()
     # プロット用整形
-    if st.sidebar.checkbox("全台平均を表示",value=False):
-        df_plot=df.groupby('date')['合成確率'].mean().reset_index().rename(columns={'合成確率':'plot_val'})
-        title=f"📈 全台平均 合成確率 | {machine_sel}"
+    # 全台平均表示チェックボックスをメイン領域に移動
+    show_avg = st.checkbox("全台平均を表示", value=False)
+    if show_avg:
+        df_plot = df.groupby('date')['合成確率'].mean().reset_index().rename(columns={'合成確率':'plot_val'})
+        title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
-        slots=[int(r[0]) for r in eng.connect().execute(sa.select(tbl.c.台番号).where(tbl.c.機種==machine_sel, tbl.c.date.between(vis_start,vis_end)).distinct().order_by(tbl.c.台番号)) if r[0] is not None]
-        slot_sel=st.selectbox("台番号",slots)
-        df_plot=df[df['台番号']==slot_sel].rename(columns={'合成確率':'plot_val'})
-        title=f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
-    # 閾値ライン
+        slots = [int(r[0]) for r in eng.connect().execute(
+            sa.select(tbl.c.台番号)
+              .where(tbl.c.機種==machine_sel, tbl.c.date.between(vis_start, vis_end))
+              .distinct()
+              .order_by(tbl.c.台番号)
+        ) if r[0] is not None]
+        slot_sel = st.selectbox("台番号", slots)
+        df_plot = df[df['台番号'] == slot_sel].rename(columns={'合成確率':'plot_val'})
+        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
+
+    # 閾値ライン」
     thresholds=setting_map.get(machine_sel,{})
     df_rules=pd.DataFrame([{'setting':k,'value':v} for k,v in thresholds.items()])
     # 凡例トグル
