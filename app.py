@@ -179,7 +179,7 @@ if mode=="📊 可視化":
     table_name=st.selectbox("テーブル選択",tables)
     tbl=get_table(table_name)
     c1,c2=st.columns(2)
-    vis_start=c1.date_input("開始日",dt.date(2025,1,1))
+    vis_start=c1.date_input("開始日",dt.date(2024,1,1))
     vis_end=c2.date_input("終了日",dt.date.today())
     try:
         machines=[r[0] for r in eng.connect().execute(sa.select(tbl.c.機種).where(tbl.c.date.between(vis_start,vis_end)).distinct())]
