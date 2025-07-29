@@ -263,6 +263,126 @@ if mode == "📊 可視化":
     vis_start = c1.date_input("開始日", dt.date(2024, 1, 1))
     vis_end   = c2.date_input("終了日", dt.date.today())
 
+    # -------- 機種リスト取得 --------
+    @st.cache_data
+    def get_machines(table_name: str, start: dt.date, end: dt.date):
+        try:
+            q = sa.select(tbl.c.機種).where(
+                tbl.c.date.between(start, end)
+            ).distinct().order_by(tbl.c.機種)
+            return [r[0] for r in eng.connect().execute(q)]
+        except Exception as e:
+            st.error(f"機種取得エラー: {e}")
+            return []
+
+    machines = get_machines(table_name, vis_start, vis_end)
+    if not machines:
+        st.warning("期間内に利用可能な機種がありません")
+        st.stop()
+    machine_sel = st.selectbox("機種選択", machines)
+
+    show_avg = st.checkbox("全台平均を表示")
+
+    # -------- データ取得 --------
+    @st.cache_data
+    def get_data(table_name: str, machine: str, start: dt.date, end: dt.date):
+        try:
+            q = sa.select(tbl).where(
+                tbl.c.機種 == machine,
+                tbl.c.date.between(start, end)
+            ).order_by(tbl.c.date)
+            return pd.read_sql(q, eng)
+        except Exception as e:
+            st.error(f"データ取得エラー: {e}")
+            return pd.DataFrame()
+
+    df = get_data(table_name, machine_sel, vis_start, vis_end)
+    if df.empty:
+        st.warning("データがありません")
+        st.stop()
+
+    if show_avg:
+        df_plot = df.groupby("date")["合成確率"].mean().reset_index().rename(columns={"合成確率":"plot_val"})
+        title = f"📈 全台平均 合成確率 | {machine_sel}"
+    else:
+        # -------- 台番号リスト取得 --------
+        @st.cache_data
+        def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date):
+            try:
+                q = sa.select(tbl.c.台番号).where(
+                    tbl.c.機種 == machine,
+                    tbl.c.date.between(start, end)
+                ).distinct().order_by(tbl.c.台番号)
+                return [int(r[0]) for r in eng.connect().execute(q) if r[0] is not None]
+            except Exception as e:
+                st.error(f"台番号取得エラー: {e}")
+                return []
+
+        slots = get_slots(table_name, machine_sel, vis_start, vis_end)
+        if not slots:
+            st.warning("対象の台番号がありません")
+            st.stop()
+        slot_sel = st.selectbox("台番号", slots)
+        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率":"plot_val"})
+        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
+
+    # -------- 閾値ライン作成 --------
+    thresholds = setting_map.get(machine_sel, {})
+    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()])
+
+    legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
+    y_axis = alt.Axis(
+        title="合成確率",
+        format=".4f",
+        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")
+    )
+    base = (
+        alt.Chart(df_plot)
+        .mark_line()
+        .encode(
+            x="date:T",
+            y=alt.Y("plot_val:Q", axis=y_axis),
+            tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=".4f")]
+        )
+        .properties(height=400)
+    )
+    rules = (
+        alt.Chart(df_rules)
+        .mark_rule(strokeDash=[4,2])
+        .encode(
+            y="value:Q",
+            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
+            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
+        )
+        .add_selection(legend_sel)
+    )
+
+    st.subheader(title)
+    st.altair_chart(base + rules, use_container_width=True)
+if mode == "📊 可視化":
+    st.header("DB 可視化")
+    try:
+        tables = [r[0] for r in eng.connect().execute(sa.text(
+            "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
+        ))]
+    except Exception as e:
+        st.error(f"テーブル一覧取得エラー: {e}")
+        st.stop()
+
+    table_name = st.selectbox("テーブル選択", tables)
+    if table_name is None:
+        st.error("テーブルが選択されていません")
+        st.stop()
+
+    try:
+        tbl = get_table(table_name)
+    except Exception:
+        st.stop()
+
+    c1, c2 = st.columns(2)
+    vis_start = c1.date_input("開始日", dt.date(2024, 1, 1))
+    vis_end   = c2.date_input("終了日", dt.date.today())
+
     # 機種リスト取得
     try:
         machines = get_machines(table_name, vis_start, vis_end)
