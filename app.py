@@ -222,6 +222,16 @@ if mode=="📊 可視化":
     legend_sel=alt.selection_multi(fields=['setting'], bind='legend')
     y_axis=alt.Axis(title='合成確率',format='.4f',labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')"))
     base=alt.Chart(df_plot).mark_line().encode(x='date:T',y=alt.Y('plot_val:Q',axis=y_axis),tooltip=['date',alt.Tooltip('plot_val:Q',title='値',format='.4f')]).properties(height=400)
-    rules=alt.Chart(df_rules).mark_rule(strokeDash=[4,2]).encode(y='value:Q',color=alt.Color('setting:N',legend=alt.Legend(title='設定')),opacity=alt.condition(legend_sel,alt.value(1),alt.value(0))).add_selection(legend_sel)
-    st.subheader(title)
+    rules=alt.Chart(df_rules)
+    .mark_rule(strokeDash=[4,2])
+    .encode(
+        y='value:Q',
+        color=alt.Color('setting:N', legend=alt.Legend(title='設定ライン'),
+                        scale=alt.Scale(scheme='category10')),
+        opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
+    )
+    .add_selection(legend_sel)
+
+st.subheader(title)
+st.altair_chart(base + rules, use_container_width=True)(title)
     st.altair_chart(base+rules,use_container_width=True)
