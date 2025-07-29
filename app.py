@@ -183,7 +183,15 @@ if mode=="📊 可視化":
         st.error(f"テーブル一覧取得エラー: {e}")
         st.stop()
     table_name = st.selectbox("テーブル選択", tables)
-    tbl = get_table(table_name)
+    # テーブル取得とエラーハンドリング
+    try:
+        if table_name is None:
+            st.error("テーブルが選択されていません")
+            st.stop()
+        tbl = get_table(table_name)
+    except Exception as e:
+        st.error(f"テーブル取得エラー: {e}")
+        st.stop()
 
     # 日付レンジ入力
     c1, c2 = st.columns(2)
