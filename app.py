@@ -143,23 +143,20 @@ def parse_meta(path: str):
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     meta = sa.MetaData()
+    # テーブルがなければ作成
     if not eng.dialect.has_table(eng.connect(), safe):
-        # マッピング後のカラム名を順序を保って一意化
-        unique_cols = list(dict.fromkeys(COLUMN_MAP[store].values()))
-        # date, 機種 は必須
         cols = [
             sa.Column("date", sa.Date),
             sa.Column("機種", sa.Text),
         ]
-        # 一意化した各列を Double 型で追加
-        for col in unique_cols:
-            cols.append(sa.Column(col, sa.Double, nullable=True))
-        # 主キーに台番号も含める
+        # COLUMN_MAP[store].values() の重複を除去（Python 3.7+ では dict.fromkeys で順序保持）
+        for col_name in dict.fromkeys(COLUMN_MAP[store].values()):
+            cols.append(sa.Column(col_name, sa.Double, nullable=True))
+        # 複合主キー設定
         cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
         # テーブル定義＆作成
         sa.Table(safe, meta, *cols)
         meta.create_all(eng)
-    # 既存テーブルを反映して返す
     return sa.Table(safe, meta, autoload_with=eng)
 
 # ========================= データ取り込み =========================
