@@ -113,7 +113,7 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
         num.loc[mask_gt1] = 1.0/num.loc[mask_gt1]
         df.loc[~mask_div,col] = num
         df[col] = df[col].astype(float)
-    int_cols=["台番号","累計スタート","スタート回数","BB回数","RB回数","ART回数","最大持ち玉","最大差玉","前日最終スタート"]
+    int_cols=["台番号","累計スタート","スタート回数","BB回数","RB回数","ART回数","最大持玉","最大差玉","前日最終スタート"]
     for col in int_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col],errors="coerce").astype("Int64")
