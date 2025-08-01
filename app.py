@@ -187,7 +187,7 @@ if mode == "📥 データ取り込み":
     st.header("Google Drive → Postgres インポート")
     folder_options = {
         "🧪 テスト用": "1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8",
-        "🚀 本番用":     "1hX8GQRuDm_E1A1Cu_fZudXL18y8-qOb8"
+        "🚀 本番用":     "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl"
     }
     sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
     folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
