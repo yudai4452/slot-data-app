@@ -146,12 +146,10 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     return df
 
-# -------- 読み込み＋正規化（カラム絞り込み） --------
+# -------- 読み込み＋正規化 --------
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    header = pd.read_csv(
-        io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0
-    ).columns.tolist()
+    header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
     df_raw = pd.read_csv(
@@ -194,17 +192,8 @@ if mode == "📥 データ取り込み":
     sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
     folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
     c1, c2 = st.columns(2)
-    imp_start = c1.date_input(
-        "開始日",
-        dt.date(2024, 1, 1),
-        key="import_start_date"
-    )
-    imp_end   = c2.date_input(
-        "終了日",
-        dt.date.today(),
-        key="import_end_date"
-    )
-
+    imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
+    imp_end   = c2.date_input("終了日", dt.date.today(), key="import_end_date")
     if st.button("🚀 インポート実行", disabled=not folder_id):
         try:
             files = [
@@ -214,44 +203,31 @@ if mode == "📥 データ取り込み":
         except Exception as e:
             st.error(f"ファイル一覧取得エラー: {e}")
             st.stop()
-
         st.write(f"🔍 対象 CSV: **{len(files)} 件**")
         bar = st.progress(0.0)
         current_file = st.empty()
-
         created_tables = set()
         for i, f in enumerate(files, 1):
             current_file.text(f"処理中ファイル: {f['path']}")
             try:
                 raw = drive.files().get_media(fileId=f["id"]).execute()
                 store, machine, date = parse_meta(f["path"])
-
                 table_name = "slot_" + store.replace(" ", "_")
                 if table_name not in created_tables:
                     tbl = ensure_store_table(store)
                     created_tables.add(table_name)
                 else:
                     tbl = get_table(table_name)
-
                 df = load_and_normalize(raw, store)
                 if df.empty:
                     continue
-
                 df['機種'], df['date'] = machine, date
                 df = df[[c for c in df.columns if c in tbl.c.keys()]]
-
-                df.to_sql(
-                    name=tbl.name,
-                    con=eng,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                    chunksize=500
-                )
+                df.to_sql(name=tbl.name, con=eng, if_exists="append",
+                          index=False, method="multi", chunksize=500)
             except Exception as e:
                 st.error(f"{f['path']} 処理エラー: {e}")
             bar.progress(i / len(files))
-
         current_file.text("")
         st.success("インポート完了！")
 
@@ -265,66 +241,54 @@ if mode == "📊 可視化":
     except Exception as e:
         st.error(f"テーブル一覧取得エラー: {e}")
         st.stop()
-
     table_name = st.selectbox("テーブル選択", tables)
     if table_name is None:
         st.error("テーブルが選択されていません")
         st.stop()
-
     tbl = get_table(table_name)
 
+    # テーブル内の最小／最大日付を取得して date_input に設定
+    with eng.connect() as conn:
+        min_date, max_date = conn.execute(
+            sa.text(f"SELECT MIN(date), MAX(date) FROM {table_name}")
+        ).first()
     c1, c2 = st.columns(2)
     vis_start = c1.date_input(
-        "開始日",
-        dt.date(2024, 1, 1),
-        key="visual_start_date"
+        "開始日", value=min_date, min_value=min_date, max_value=max_date, key="visual_start_date"
     )
     vis_end   = c2.date_input(
-        "終了日",
-        dt.date.today(),
-        key="visual_end_date"
+        "終了日", value=max_date, min_value=min_date, max_value=max_date, key="visual_end_date"
     )
 
     @st.cache_data
     def get_machines(table_name: str, start: dt.date, end: dt.date):
         q = sa.select(tbl.c.機種).where(tbl.c.date.between(start, end)).distinct()
         return [r[0] for r in eng.connect().execute(q)]
-
     machines = get_machines(table_name, vis_start, vis_end)
     machine_sel = st.selectbox("機種選択", machines)
-
     show_avg = st.checkbox("全台平均を表示")
 
     @st.cache_data
     def get_data(table_name: str, machine: str, start: dt.date, end: dt.date):
-        q = sa.select(tbl).where(
-            tbl.c.機種 == machine,
-            tbl.c.date.between(start, end)
-        ).order_by(tbl.c.date)
+        q = sa.select(tbl).where(tbl.c.機種 == machine,
+                                    tbl.c.date.between(start, end)
+                                ).order_by(tbl.c.date)
         return pd.read_sql(q, eng)
-
     df = get_data(table_name, machine_sel, vis_start, vis_end)
     if df.empty:
         st.warning("データがありません")
         st.stop()
 
     if show_avg:
-        df_plot = (
-            df.groupby("date")["合成確率"]
-              .mean()
-              .reset_index()
-              .rename(columns={"合成確率": "plot_val"})
-        )
+        df_plot = df.groupby("date")["合成確率"].mean().reset_index().rename(columns={"合成確率": "plot_val"})
         title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
         @st.cache_data
         def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date):
-            q = sa.select(tbl.c.台番号).where(
-                tbl.c.機種 == machine,
-                tbl.c.date.between(start, end)
-            ).distinct().order_by(tbl.c.台番号)
+            q = sa.select(tbl.c.台番号).where(tbl.c.機種 == machine,
+                                                tbl.c.date.between(start, end)
+                                            ).distinct().order_by(tbl.c.台番号)
             return [int(r[0]) for r in eng.connect().execute(q) if r[0] is not None]
-
         slots = get_slots(table_name, machine_sel, vis_start, vis_end)
         slot_sel = st.selectbox("台番号", slots)
         df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
@@ -332,33 +296,19 @@ if mode == "📊 可視化":
 
     thresholds = setting_map.get(machine_sel, {})
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()])
-
     legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")
-    )
-    base = (
-        alt.Chart(df_plot)
-        .mark_line()
-        .encode(
-            x="date:T",
-            y=alt.Y("plot_val:Q", axis=y_axis),
-            tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=".4f")]
-        )
-        .properties(height=400)
-    )
-    rules = (
-        alt.Chart(df_rules)
-        .mark_rule(strokeDash=[4,2])
-        .encode(
-            y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
-        )
-        .add_selection(legend_sel)
-    )
+    y_axis = alt.Axis(title="合成確率", format=".4f",
+                      labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')"))
+    base = alt.Chart(df_plot).mark_line().encode(
+        x="date:T",
+        y=alt.Y("plot_val:Q", axis=y_axis),
+        tooltip=["date", alt.Tooltip("plot_val:Q", title="値", format=".4f")]
+    ).properties(height=400)
+    rules = alt.Chart(df_rules).mark_rule(strokeDash=[4,2]).encode(
+        y="value:Q",
+        color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
+        opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
+    ).add_selection(legend_sel)
 
     st.subheader(title)
     st.altair_chart(base + rules, use_container_width=True)
