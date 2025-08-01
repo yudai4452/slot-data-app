@@ -62,20 +62,43 @@ def get_table(table_name: str) -> sa.Table:
 # -------- 定義マッピング --------
 COLUMN_MAP = {
     "メッセ武蔵境": {
-        "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
-        "BB回数":"BB回数","RB回数":"RB回数","ART回数":"ART回数","最大持ち玉":"最大持玉",
-        "BB確率":"BB確率","RB確率":"RB確率","ART確率":"ART確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート",
+        "台番号":           "台番号",
+        "スタート回数":     "スタート回数",
+        "累計スタート":     "累計スタート",
+        "BB回数":          "BB回数",
+        "RB回数":          "RB回数",
+        "ART回数":         "ART回数",
+        "最大持ち玉":       "最大持玉",
+        "BB確率":          "BB確率",
+        "RB確率":          "RB確率",
+        "ART確率":         "ART確率",
+        "合成確率":        "合成確率",
+        "前日最終スタート": "前日最終スタート",
     },
-    "ジャンジャンマールゴット分倍河原":{
-        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        "最大持ち玉":"最大持玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    "ジャンジャンマールゴット分倍河原": {
+        "台番号":           "台番号",
+        "累計スタート":     "累計スタート",
+        "BB回数":          "BB回数",
+        "RB回数":          "RB回数",
+        "最大持ち玉":       "最大持玉",
+        "最大持玉":         "最大持玉",   # 追加：重複しても一度だけ扱う
+        "BB確率":          "BB確率",
+        "RB確率":          "RB確率",
+        "合成確率":        "合成確率",
+        "前日最終スタート": "前日最終スタート",
+        "スタート回数":     "スタート回数",
     },
-    "プレゴ立川":{
-        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        "最大差玉":"最大差玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+    "プレゴ立川": {
+        "台番号":           "台番号",
+        "累計スタート":     "累計スタート",
+        "BB回数":          "BB回数",
+        "RB回数":          "RB回数",
+        "最大差玉":         "最大差玉",
+        "BB確率":          "BB確率",
+        "RB確率":          "RB確率",
+        "合成確率":        "合成確率",
+        "前日最終スタート": "前日最終スタート",
+        "スタート回数":     "スタート回数",
     },
 }
 
@@ -102,24 +125,28 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     df = df_raw.rename(columns=COLUMN_MAP[store])
     prob_cols = ["BB確率","RB確率","ART確率","合成確率"]
     for col in prob_cols:
-        if col not in df.columns: continue
+        if col not in df.columns:
+            continue
         ser = df[col].astype(str)
         mask_div = ser.str.contains("/")
         if mask_div.any():
             denom = ser[mask_div].str.split("/", expand=True)[1].astype(float)
-            df.loc[mask_div,col] = denom.where(denom!=0, pd.NA).rdiv(1.0).fillna(0)
+            df.loc[mask_div, col] = denom.where(denom!=0, pd.NA).rdiv(1.0).fillna(0)
         num = pd.to_numeric(ser[~mask_div], errors="coerce")
-        mask_gt1 = num>1
-        num.loc[mask_gt1] = 1.0/num.loc[mask_gt1]
-        df.loc[~mask_div,col] = num
+        mask_gt1 = num > 1
+        num.loc[mask_gt1] = 1.0 / num.loc[mask_gt1]
+        df.loc[~mask_div, col] = num
         df[col] = df[col].astype(float)
-    int_cols=["台番号","累計スタート","スタート回数","BB回数","RB回数","ART回数","最大持玉","最大差玉","前日最終スタート"]
+    int_cols = [
+        "台番号","累計スタート","スタート回数","BB回数",
+        "RB回数","ART回数","最大持玉","最大差玉","前日最終スタート"
+    ]
     for col in int_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col],errors="coerce").astype("Int64")
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     return df
 
-# -------- キャッシュ付き読み込み＋正規化（カラム絞り込み） --------
+# -------- 読み込み＋正規化（カラム絞り込み） --------
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
     usecols = list(COLUMN_MAP[store].keys()) + ["台番号"]
@@ -143,20 +170,21 @@ def parse_meta(path: str):
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     meta = sa.MetaData()
-    # テーブルがなければ作成
+
     if not eng.dialect.has_table(eng.connect(), safe):
         cols = [
             sa.Column("date", sa.Date),
             sa.Column("機種", sa.Text),
         ]
-        # COLUMN_MAP[store].values() の重複を除去（Python 3.7+ では dict.fromkeys で順序保持）
-        for col_name in dict.fromkeys(COLUMN_MAP[store].values()):
+        # dict.fromkeys で重複を除去しつつ順序を保持
+        unique_cols = list(dict.fromkeys(COLUMN_MAP[store].values()))
+        for col_name in unique_cols:
             cols.append(sa.Column(col_name, sa.Double, nullable=True))
-        # 複合主キー設定
+
         cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
-        # テーブル定義＆作成
         sa.Table(safe, meta, *cols)
         meta.create_all(eng)
+
     return sa.Table(safe, meta, autoload_with=eng)
 
 # ========================= データ取り込み =========================
@@ -164,12 +192,12 @@ if mode == "📥 データ取り込み":
     st.header("Google Drive → Postgres インポート")
     folder_options = {
         "🧪 テスト用": "1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8",
-        "🚀 本番用": "1hX8GQRuDm_E1A1Cu_fZudXL18y8-qOb8"
+        "🚀 本番用":     "1hX8GQRuDm_E1A1Cu_fZudXL18y8-qOb8"
     }
     sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
     folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
     c1, c2 = st.columns(2)
-    imp_start = c1.date_input("開始日", dt.date(2024,1,1))
+    imp_start = c1.date_input("開始日", dt.date(2024, 1, 1))
     imp_end   = c2.date_input("終了日", dt.date.today())
 
     if st.button("🚀 インポート実行", disabled=not folder_id):
@@ -207,7 +235,6 @@ if mode == "📥 データ取り込み":
                 df['機種'], df['date'] = machine, date
                 df = df[[c for c in df.columns if c in tbl.c.keys()]]
 
-                # バルク挿入
                 df.to_sql(
                     name=tbl.name,
                     con=eng,
@@ -220,7 +247,7 @@ if mode == "📥 データ取り込み":
                 st.error(f"{f['path']} 処理エラー: {e}")
             bar.progress(i / len(files))
 
-        current_file.text("")  # 処理完了後クリア
+        current_file.text("")
         st.success("インポート完了！")
 
 # ========================= 可視化モード =========================
@@ -239,14 +266,10 @@ if mode == "📊 可視化":
         st.error("テーブルが選択されていません")
         st.stop()
 
-    try:
-        tbl = get_table(table_name)
-    except Exception as e:
-        st.error(f"テーブル取得エラー: {e}")
-        st.stop()
+    tbl = get_table(table_name)
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", dt.date(2024,1,1))
+    vis_start = c1.date_input("開始日", dt.date(2024, 1, 1))
     vis_end   = c2.date_input("終了日", dt.date.today())
 
     @st.cache_data
@@ -277,7 +300,7 @@ if mode == "📊 可視化":
             df.groupby("date")["合成確率"]
               .mean()
               .reset_index()
-              .rename(columns={"合成確率":"plot_val"})
+              .rename(columns={"合成確率": "plot_val"})
         )
         title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
@@ -291,7 +314,7 @@ if mode == "📊 可視化":
 
         slots = get_slots(table_name, machine_sel, vis_start, vis_end)
         slot_sel = st.selectbox("台番号", slots)
-        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率":"plot_val"})
+        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
     thresholds = setting_map.get(machine_sel, {})
@@ -301,7 +324,7 @@ if mode == "📊 可視化":
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
-        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")
+        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")  # 1/◯ 表示
     )
     base = (
         alt.Chart(df_plot)
@@ -318,7 +341,7 @@ if mode == "📊 可視化":
         .mark_rule(strokeDash=[4,2])
         .encode(
             y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"), scale=alt.Scale(scheme="category10")),
+            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
         )
         .add_selection(legend_sel)
