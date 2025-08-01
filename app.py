@@ -81,7 +81,7 @@ COLUMN_MAP = {
         "BB回数":          "BB回数",
         "RB回数":          "RB回数",
         "最大持ち玉":       "最大持玉",
-        "最大持玉":         "最大持玉",   # 追加：重複しても一度だけ扱う
+        "最大持玉":         "最大持玉",
         "BB確率":          "BB確率",
         "RB確率":          "RB確率",
         "合成確率":        "合成確率",
@@ -149,27 +149,16 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 # -------- 読み込み＋正規化（カラム絞り込み） --------
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    # マッピングキーを取得し順序を保持しつつ重複除去
-    mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
-    # ヘッダーだけ読み込んで、実際に存在するカラム名リストを取得
     header = pd.read_csv(
-        io.BytesIO(raw_bytes),
-        encoding="shift_jis",
-        nrows=0
+        io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0
     ).columns.tolist()
-    # 存在するマッピングキーのみを usecols に指定
+    mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
-
-    # 本読み込み（on_bad_lines="skip" はお好みで）
     df_raw = pd.read_csv(
-        io.BytesIO(raw_bytes),
-        encoding="shift_jis",
-        usecols=usecols,
-        on_bad_lines="skip",
-        engine="c"
+        io.BytesIO(raw_bytes), encoding="shift_jis", usecols=usecols,
+        on_bad_lines="skip", engine="c"
     )
     return normalize(df_raw, store)
-
 
 # -------- メタ情報解析 --------
 def parse_meta(path: str):
@@ -182,21 +171,17 @@ def parse_meta(path: str):
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     meta = sa.MetaData()
-
     if not eng.dialect.has_table(eng.connect(), safe):
         cols = [
             sa.Column("date", sa.Date),
             sa.Column("機種", sa.Text),
         ]
-        # dict.fromkeys で重複を除去しつつ順序を保持
         unique_cols = list(dict.fromkeys(COLUMN_MAP[store].values()))
         for col_name in unique_cols:
             cols.append(sa.Column(col_name, sa.Double, nullable=True))
-
         cols.append(sa.PrimaryKeyConstraint("date", "機種", "台番号"))
         sa.Table(safe, meta, *cols)
         meta.create_all(eng)
-
     return sa.Table(safe, meta, autoload_with=eng)
 
 # ========================= データ取り込み =========================
@@ -209,8 +194,16 @@ if mode == "📥 データ取り込み":
     sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
     folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
     c1, c2 = st.columns(2)
-    imp_start = c1.date_input("開始日", dt.date(2024, 1, 1))
-    imp_end   = c2.date_input("終了日", dt.date.today())
+    imp_start = c1.date_input(
+        "開始日",
+        dt.date(2024, 1, 1),
+        key="import_start_date"
+    )
+    imp_end   = c2.date_input(
+        "終了日",
+        dt.date.today(),
+        key="import_end_date"
+    )
 
     if st.button("🚀 インポート実行", disabled=not folder_id):
         try:
@@ -281,8 +274,16 @@ if mode == "📊 可視化":
     tbl = get_table(table_name)
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", dt.date(2024, 1, 1))
-    vis_end   = c2.date_input("終了日", dt.date.today())
+    vis_start = c1.date_input(
+        "開始日",
+        dt.date(2024, 1, 1),
+        key="visual_start_date"
+    )
+    vis_end   = c2.date_input(
+        "終了日",
+        dt.date.today(),
+        key="visual_end_date"
+    )
 
     @st.cache_data
     def get_machines(table_name: str, start: dt.date, end: dt.date):
@@ -336,7 +337,7 @@ if mode == "📊 可視化":
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
-        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")  # 1/◯ 表示
+        labelExpr=("datum.value==0?'0':'1/'+format(round(1/datum.value),'d')")
     )
     base = (
         alt.Chart(df_plot)
