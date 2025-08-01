@@ -149,7 +149,18 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 # -------- 読み込み＋正規化（カラム絞り込み） --------
 @st.cache_data
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    usecols = list(COLUMN_MAP[store].keys()) + ["台番号"]
+    # マッピングキーを取得し順序を保持しつつ重複除去
+    mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
+    # ヘッダーだけ読み込んで、実際に存在するカラム名リストを取得
+    header = pd.read_csv(
+        io.BytesIO(raw_bytes),
+        encoding="shift_jis",
+        nrows=0
+    ).columns.tolist()
+    # 存在するマッピングキーのみを usecols に指定
+    usecols = [col for col in mapping_keys if col in header]
+
+    # 本読み込み（on_bad_lines="skip" はお好みで）
     df_raw = pd.read_csv(
         io.BytesIO(raw_bytes),
         encoding="shift_jis",
@@ -158,6 +169,7 @@ def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
         engine="c"
     )
     return normalize(df_raw, store)
+
 
 # -------- メタ情報解析 --------
 def parse_meta(path: str):
