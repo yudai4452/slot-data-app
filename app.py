@@ -1,5 +1,7 @@
 import io
 import re
+import time
+import random
 import datetime as dt
 import pandas as pd
 import streamlit as st
@@ -13,11 +15,18 @@ import json
 
 # ======================== 基本設定 ========================
 st.set_page_config(page_title="Slot Manager", layout="wide")
-mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"))
 st.title("🎰 Slot Data Manager & Visualizer")
+mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"))
 
 SA_INFO = st.secrets["gcp_service_account"]
 PG_CFG  = st.secrets["connections"]["slot_db"]
+
+# キャッシュクリア
+with st.sidebar:
+    if st.button("♻️ キャッシュをクリア"):
+        st.cache_data.clear()
+        st.success("キャッシュをクリアしました。")
+        st.rerun()
 
 # ======================== 設定ファイル ========================
 with open("setting.json", encoding="utf-8") as f:
@@ -54,7 +63,7 @@ if eng is None:
     st.stop()
 
 # ======================== カラム定義マッピング ========================
-# 「最大持ち玉」と「最大持玉」の表記ゆれを両方吸収
+# 「最大持ち玉」と「最大持玉」の表記ゆれ両対応
 COLUMN_MAP = {
     "メッセ武蔵境": {
         "台番号":           "台番号",
@@ -98,8 +107,19 @@ COLUMN_MAP = {
     },
 }
 
+# ======================== Google API リトライユーティリティ ========================
+def gapi_call(req_builder, *a, **kw):
+    """Google API 呼び出しに指数バックオフを適用"""
+    for i in range(5):
+        try:
+            return req_builder(*a, **kw).execute()
+        except Exception as e:
+            if i == 4:
+                raise
+            time.sleep((2 ** i) + random.random())
+
 # ======================== Drive: 再帰 + ページング ========================
-@st.cache_data
+@st.cache_data(ttl=300)
 def list_csv_recursive(folder_id: str):
     if drive is None:
         raise RuntimeError("Drive未接続です")
@@ -108,11 +128,12 @@ def list_csv_recursive(folder_id: str):
         fid, cur = queue.pop()
         page_token = None
         while True:
-            res = drive.files().list(
+            res = gapi_call(
+                drive.files().list,
                 q=f"'{fid}' in parents and trashed=false",
                 fields="nextPageToken, files(id,name,mimeType)",
                 pageSize=1000, pageToken=page_token
-            ).execute()
+            )
             for f in res.get("files", []):
                 if f["mimeType"] == "application/vnd.google-apps.folder":
                     queue.append((f["id"], f"{cur}/{f['name']}"))
@@ -155,18 +176,18 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
                 errors="coerce"
             )
             val = 1.0 / denom
-            # 0, 負値, 欠損は0に
-            val[(denom <= 0) | (~denom.notna())] = 0
+            val[(denom <= 0) | (~denom.notna())] = 0  # 0/負/欠損は0に
             df.loc[mask_div, col] = val
 
         # 数値直書き（>1 は 1/値, <=1 はそのまま）
-        num = pd.to_numeric(ser[ ~mask_div ], errors="coerce")
+        num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
-        conv = conv.fillna(0)
-        df.loc[~mask_div, col] = conv
+        df.loc[~mask_div, col] = conv.fillna(0)
 
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+        # 値域クランプ（わずかな外れも0〜1に収める）
+        df[col] = df[col].clip(lower=0, upper=1)
 
     # 整数カラム
     int_cols = [
@@ -180,7 +201,7 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
     return df
 
 # ======================== 読み込み + 正規化 ========================
-@st.cache_data
+@st.cache_data(ttl=300)
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
     header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
@@ -205,7 +226,6 @@ def ensure_store_table(store: str):
             sa.Column("機種", sa.Text, nullable=False),
             sa.Column("台番号", sa.Integer, nullable=False),
         ]
-        # 重複を除いた正規化後の列名
         unique_cols = list(dict.fromkeys(COLUMN_MAP[store].values()))
         numeric_int = {
             "台番号", "累計スタート", "スタート回数", "BB回数", "RB回数",
@@ -223,15 +243,30 @@ def ensure_store_table(store: str):
         return t
     return sa.Table(safe, meta, autoload_with=eng)
 
-# ======================== アップサート（重複耐性） ========================
+def ensure_indexes(table_name: str, conn):
+    conn.execute(sa.text(
+        f"CREATE INDEX IF NOT EXISTS ix_{table_name}_date_machine ON {table_name}(date, 機種)"
+    ))
+    conn.execute(sa.text(
+        f"CREATE INDEX IF NOT EXISTS ix_{table_name}_machine_slot_date ON {table_name}(機種, 台番号, date)"
+    ))
+
+# ======================== アップサート（新規/更新件数を返す） ========================
 def upsert_dataframe(conn, table, df: pd.DataFrame, pk=("date", "機種", "台番号")):
     rows = df.to_dict(orient="records")
     if not rows:
-        return
+        return 0, 0
     stmt = pg_insert(table).values(rows)
     update_cols = {c.name: stmt.excluded[c.name] for c in table.c if c.name not in pk}
-    stmt = stmt.on_conflict_do_update(index_elements=list(pk), set_=update_cols)
-    conn.execute(stmt)
+    # Postgresのxmaxで新規(0)/更新(!=0) を判定
+    stmt = stmt.on_conflict_do_update(
+        index_elements=list(pk),
+        set_=update_cols
+    ).returning(sa.literal_column("xmax"))
+    res = conn.execute(stmt).fetchall()
+    created = sum(1 for r in res if getattr(r, "xmax", 0) == 0)
+    updated = len(res) - created
+    return created, updated
 
 # ========================= データ取り込み =========================
 if mode == "📥 データ取り込み":
@@ -251,7 +286,7 @@ if mode == "📥 データ取り込み":
         try:
             files = [
                 f for f in list_csv_recursive(folder_id)
-                if imp_start <= parse_meta(f['path'])[2] <= imp_end
+                if imp_start <= parse_meta(f["path"])[2] <= imp_end
             ]
         except Exception as e:
             st.error(f"ファイル一覧取得エラー: {e}")
@@ -261,13 +296,16 @@ if mode == "📥 データ取り込み":
         bar = st.progress(0.0)
         current_file = st.empty()
         created_tables = {}
+        total_new = total_upd = 0
+        errors = []
 
         for i, f in enumerate(files, 1):
             current_file.text(f"処理中ファイル: {f['path']}")
             try:
-                raw = drive.files().get_media(fileId=f["id"]).execute()
+                raw = gapi_call(drive.files().get_media, fileId=f["id"])
                 store, machine, date = parse_meta(f["path"])
                 table_name = "slot_" + store.replace(" ", "_")
+
                 if table_name not in created_tables:
                     tbl = ensure_store_table(store)
                     created_tables[table_name] = tbl
@@ -285,15 +323,23 @@ if mode == "📥 データ取り込み":
                 df = df[[c for c in df.columns if c in valid_cols]]
 
                 with eng.begin() as conn:
-                    upsert_dataframe(conn, tbl, df)
+                    n_new, n_upd = upsert_dataframe(conn, tbl, df)
+                    ensure_indexes(tbl.name, conn)
+                    total_new += n_new
+                    total_upd += n_upd
 
             except Exception as e:
-                st.error(f"{f['path']} 処理エラー: {e}")
+                errors.append({"file": f["path"], "error": str(e)})
 
             bar.progress(i / len(files))
 
         current_file.text("")
-        st.success("インポート完了！")
+
+        if errors:
+            st.error(f"⚠️ {len(errors)}件のファイルで失敗しました。下の表を確認してください。")
+            st.dataframe(pd.DataFrame(errors))
+
+        st.success(f"インポート完了！ 新規: {total_new:,} / 更新: {total_upd:,}")
 
 # ========================= 可視化モード =========================
 if mode == "📊 可視化":
@@ -329,104 +375,10 @@ if mode == "📊 可視化":
         st.info("このテーブルには日付データがありません。まず取り込みを実行してください。")
         st.stop()
 
+    # 直近90日を初期値（範囲外なら min/max に丸め）
+    default_start = max(min_date, max_date - dt.timedelta(days=89))
+    default_end = max_date
+
     c1, c2 = st.columns(2)
     vis_start = c1.date_input(
-        "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
-    )
-    vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}"
-    )
-
-    # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
-    needed_cols = tuple(c.name for c in tbl.c)
-
-    @st.cache_data
-    def get_machines(table_name: str, start: dt.date, end: dt.date, _cols_key: tuple):
-        t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-        q = sa.select(t.c.機種).where(t.c.date.between(start, end)).distinct()
-        with eng.connect() as conn:
-            return [r[0] for r in conn.execute(q)]
-
-    machines = get_machines(table_name, vis_start, vis_end, needed_cols)
-    if not machines:
-        st.warning("指定期間にデータがありません")
-        st.stop()
-
-    machine_sel = st.selectbox("機種選択", machines)
-    show_avg = st.checkbox("全台平均を表示")
-
-    @st.cache_data
-    def get_data(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
-        t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-        q = sa.select(t).where(
-            t.c.機種 == machine,
-            t.c.date.between(start, end)
-        ).order_by(t.c.date)
-        return pd.read_sql(q, eng)
-
-    df = get_data(table_name, machine_sel, vis_start, vis_end, needed_cols)
-    if df.empty:
-        st.warning("データがありません")
-        st.stop()
-
-    if show_avg:
-        df_plot = (
-            df.groupby("date", as_index=False)["合成確率"]
-              .mean()
-              .rename(columns={"合成確率": "plot_val"})
-        )
-        title = f"📈 全台平均 合成確率 | {machine_sel}"
-    else:
-        @st.cache_data
-        def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
-            t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-            q = sa.select(t.c.台番号).where(
-                t.c.機種 == machine, t.c.date.between(start, end)
-            ).distinct().order_by(t.c.台番号)
-            with eng.connect() as conn:
-                vals = [r[0] for r in conn.execute(q) if r[0] is not None]
-            # Int64やfloat混在を避けて整数表示
-            return [int(v) for v in vals]
-
-        slots = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
-        if not slots:
-            st.warning("台番号のデータが見つかりません")
-            st.stop()
-        slot_sel = st.selectbox("台番号", slots)
-        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
-        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
-
-    # 設定ライン
-    thresholds = setting_map.get(machine_sel, {})
-    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) if thresholds else pd.DataFrame(columns=["setting","value"])
-
-    legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
-
-    # 0は0、>0は 1/x 表示（安全に）
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
-    )
-
-    base = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
-        y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=[
-            alt.Tooltip("date:T", title="日付"),
-            alt.Tooltip("plot_val:Q", title="値", format=".4f")
-        ],
-    ).properties(height=400)
-
-    if not df_rules.empty:
-        rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
-        ).add_selection(legend_sel)
-        chart = base + rules
-    else:
-        chart = base
-
-    st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
+        "開始日", value=default_start, min_value=min
