@@ -44,7 +44,7 @@ def engine():
             f"postgresql+psycopg2://{PG_CFG.username}:{PG_CFG.password}"
             f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}?sslmode=require"
         )
-        return sa.create_engine(url, pool_pre_ping=True)
+        return sa.create_engine(url, pool_pre_ping=True, echo=False)
     except Exception as e:
         st.error(f"DB接続エラー: {e}")
         return None
@@ -60,39 +60,39 @@ COLUMN_MAP = {
         "台番号":           "台番号",
         "スタート回数":     "スタート回数",
         "累計スタート":     "累計スタート",
-        "BB回数":          "BB回数",
-        "RB回数":          "RB回数",
-        "ART回数":         "ART回数",
+        "BB回数":           "BB回数",
+        "RB回数":           "RB回数",
+        "ART回数":          "ART回数",
         "最大持ち玉":       "最大持玉",
         "最大持玉":         "最大持玉",
-        "BB確率":          "BB確率",
-        "RB確率":          "RB確率",
-        "ART確率":         "ART確率",
-        "合成確率":        "合成確率",
+        "BB確率":           "BB確率",
+        "RB確率":           "RB確率",
+        "ART確率":          "ART確率",
+        "合成確率":         "合成確率",
         "前日最終スタート": "前日最終スタート",
     },
     "ジャンジャンマールゴット分倍河原": {
         "台番号":           "台番号",
         "累計スタート":     "累計スタート",
-        "BB回数":          "BB回数",
-        "RB回数":          "RB回数",
+        "BB回数":           "BB回数",
+        "RB回数":           "RB回数",
         "最大持ち玉":       "最大持玉",
         "最大持玉":         "最大持玉",
-        "BB確率":          "BB確率",
-        "RB確率":          "RB確率",
-        "合成確率":        "合成確率",
+        "BB確率":           "BB確率",
+        "RB確率":           "RB確率",
+        "合成確率":         "合成確率",
         "前日最終スタート": "前日最終スタート",
         "スタート回数":     "スタート回数",
     },
     "プレゴ立川": {
         "台番号":           "台番号",
         "累計スタート":     "累計スタート",
-        "BB回数":          "BB回数",
-        "RB回数":          "RB回数",
+        "BB回数":           "BB回数",
+        "RB回数":           "RB回数",
         "最大差玉":         "最大差玉",
-        "BB確率":          "BB確率",
-        "RB確率":          "RB確率",
-        "合成確率":        "合成確率",
+        "BB確率":           "BB確率",
+        "RB確率":           "RB確率",
+        "合成確率":         "合成確率",
         "前日最終スタート": "前日最終スタート",
         "スタート回数":     "スタート回数",
     },
@@ -155,12 +155,11 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
                 errors="coerce"
             )
             val = 1.0 / denom
-            # 0, 負値, 欠損は0に
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
         # 数値直書き（>1 は 1/値, <=1 はそのまま）
-        num = pd.to_numeric(ser[ ~mask_div ], errors="coerce")
+        num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
         conv = conv.fillna(0)
@@ -220,6 +219,11 @@ def ensure_store_table(store: str):
                 cols.append(sa.Column(col_name, sa.Float))
         t = sa.Table(safe, meta, *cols, sa.PrimaryKeyConstraint("date", "機種", "台番号"))
         meta.create_all(eng)
+
+        # 推奨インデックス
+        with eng.begin() as conn:
+            conn.execute(sa.text(f"CREATE INDEX IF NOT EXISTS idx_{safe}_kisyudate ON {safe}(機種, date)"))
+            conn.execute(sa.text(f"CREATE INDEX IF NOT EXISTS idx_{safe}_date ON {safe}(date)"))
         return t
     return sa.Table(safe, meta, autoload_with=eng)
 
@@ -241,7 +245,12 @@ if mode == "📥 データ取り込み":
         "🚀 本番用":   "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl",
     }
     sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
-    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
+    with st.expander("高度なオプション（非推奨操作は慎重に）", expanded=False):
+        folder_id = st.text_input("Google Drive フォルダ ID を手入力", value=folder_options[sel_label])
+        dry_run = st.checkbox("ドライラン（DBには書き込まない）", value=False)
+        exclude_kw = st.text_input("ファイル名に含まれていたら除外（カンマ区切り）", value="サンプル,テスト").strip()
+    if not folder_id:
+        folder_id = folder_options[sel_label]
 
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
@@ -262,7 +271,14 @@ if mode == "📥 データ取り込み":
         current_file = st.empty()
         created_tables = {}
 
+        exclude_list = [x.strip() for x in exclude_kw.split(",") if x.strip()]
+
         for i, f in enumerate(files, 1):
+            # 除外ルール
+            if any(x in f["name"] for x in exclude_list):
+                bar.progress(i / len(files))
+                continue
+
             current_file.text(f"処理中ファイル: {f['path']}")
             try:
                 raw = drive.files().get_media(fileId=f["id"]).execute()
@@ -280,12 +296,12 @@ if mode == "📥 データ取り込み":
                     continue
 
                 df["機種"], df["date"] = machine, date
-                # テーブルに存在する列のみ
                 valid_cols = [c.name for c in tbl.c]
                 df = df[[c for c in df.columns if c in valid_cols]]
 
-                with eng.begin() as conn:
-                    upsert_dataframe(conn, tbl, df)
+                if not dry_run:
+                    with eng.begin() as conn:
+                        upsert_dataframe(conn, tbl, df)
 
             except Exception as e:
                 st.error(f"{f['path']} 処理エラー: {e}")
@@ -293,7 +309,7 @@ if mode == "📥 データ取り込み":
             bar.progress(i / len(files))
 
         current_file.text("")
-        st.success("インポート完了！")
+        st.success("インポート完了！" + ("（ドライラン）" if dry_run else ""))
 
 # ========================= 可視化モード =========================
 if mode == "📊 可視化":
@@ -313,10 +329,13 @@ if mode == "📊 可視化":
         st.info("まず取り込みモードでデータを入れてください。")
         st.stop()
 
-    table_name = st.selectbox("テーブル選択", tables)
-    if not table_name:
-        st.error("テーブルが選択されていません")
-        st.stop()
+    # URLパラメータから初期化
+    qparams = st.query_params
+    default_table = qparams.get("table") if "table" in qparams else None
+    if default_table in tables:
+        table_name = st.selectbox("テーブル選択", tables, index=tables.index(default_table))
+    else:
+        table_name = st.selectbox("テーブル選択", tables)
 
     tbl = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
 
@@ -329,13 +348,29 @@ if mode == "📊 可視化":
         st.info("このテーブルには日付データがありません。まず取り込みを実行してください。")
         st.stop()
 
-    c1, c2 = st.columns(2)
-    vis_start = c1.date_input(
-        "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
+    # 期間プリセット
+    preset = st.radio(
+        "期間プリセット",
+        ["過去7日", "過去30日", "全期間", "カスタム"],
+        horizontal=True,
+        index=1,
+        help="よく使う期間をワンタップで切替"
     )
-    vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}"
-    )
+
+    if preset == "過去7日":
+        vis_start, vis_end = max_date - dt.timedelta(days=6), max_date
+    elif preset == "過去30日":
+        vis_start, vis_end = max_date - dt.timedelta(days=29), max_date
+    elif preset == "全期間":
+        vis_start, vis_end = min_date, max_date
+    else:
+        c1, c2 = st.columns(2)
+        vis_start = c1.date_input(
+            "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
+        )
+        vis_end   = c2.date_input(
+            "終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}"
+        )
 
     # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
     needed_cols = tuple(c.name for c in tbl.c)
@@ -343,7 +378,7 @@ if mode == "📊 可視化":
     @st.cache_data
     def get_machines(table_name: str, start: dt.date, end: dt.date, _cols_key: tuple):
         t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-        q = sa.select(t.c.機種).where(t.c.date.between(start, end)).distinct()
+        q = sa.select(t.c.機種).where(t.c.date.between(start, end)).distinct().order_by(t.c.機種)
         with eng.connect() as conn:
             return [r[0] for r in conn.execute(q)]
 
@@ -352,8 +387,16 @@ if mode == "📊 可視化":
         st.warning("指定期間にデータがありません")
         st.stop()
 
-    machine_sel = st.selectbox("機種選択", machines)
-    show_avg = st.checkbox("全台平均を表示")
+    # 機種検索
+    q_machine = st.text_input("機種名で検索", placeholder="例: マイジャグラー")
+    filtered_machines = [m for m in machines if (q_machine in m) ] if q_machine else machines
+
+    # URLパラメータから機種初期値
+    default_machine = qparams.get("machine") if "machine" in qparams else None
+    if default_machine in filtered_machines:
+        machine_sel = st.selectbox("機種選択", filtered_machines, index=filtered_machines.index(default_machine))
+    else:
+        machine_sel = st.selectbox("機種選択", filtered_machines)
 
     @st.cache_data
     def get_data(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
@@ -361,7 +404,7 @@ if mode == "📊 可視化":
         q = sa.select(t).where(
             t.c.機種 == machine,
             t.c.date.between(start, end)
-        ).order_by(t.c.date)
+        ).order_by(t.c.date, t.c.台番号)
         return pd.read_sql(q, eng)
 
     df = get_data(table_name, machine_sel, vis_start, vis_end, needed_cols)
@@ -369,64 +412,143 @@ if mode == "📊 可視化":
         st.warning("データがありません")
         st.stop()
 
-    if show_avg:
-        df_plot = (
+    # URLへ現在の状態を反映
+    st.query_params.update({"table": table_name, "machine": machine_sel})
+
+    # 表示形式：1/◯ or 実数
+    fmt_as_fraction = st.toggle("Y軸を 1/◯ 表示にする", value=True)
+
+    # 設定ライン
+    thresholds = setting_map.get(machine_sel, {})
+    df_rules = pd.DataFrame(
+        [{"setting": k, "value": v} for k, v in thresholds.items()]
+    ) if thresholds else pd.DataFrame(columns=["setting","value"])
+
+    # チャート用ユーティリティ（背景ハイライト）
+    def build_hot_background(vis_start, vis_end):
+        df_bg = pd.DataFrame({"date": pd.date_range(vis_start, vis_end, freq="D")})
+        df_bg["is_hot"] = df_bg["date"].apply(lambda d: (d.day in (5, 7)) or (d.weekday() >= 5))
+        bg = alt.Chart(df_bg).mark_rect(opacity=0.08).encode(
+            x="date:T",
+            color=alt.condition("datum.is_hot", alt.value("red"), alt.value("transparent"), legend=None)
+        )
+        return bg
+
+    # Y軸
+    if fmt_as_fraction:
+        y_axis = alt.Axis(
+            title="合成確率",
+            labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
+        )
+        val_tooltip_format = ".4f"
+    else:
+        y_axis = alt.Axis(title="合成確率(実数)", format=".4f")
+        val_tooltip_format = ".4f"
+
+    # タブ：平均 / 単台 / 複数台
+    tab_avg, tab_single, tab_multi = st.tabs(["全台平均", "単台", "複数台比較"])
+
+    # -------------- 全台平均 --------------
+    with tab_avg:
+        df_avg = (
             df.groupby("date", as_index=False)["合成確率"]
               .mean()
               .rename(columns={"合成確率": "plot_val"})
         )
-        title = f"📈 全台平均 合成確率 | {machine_sel}"
-    else:
-        @st.cache_data
-        def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
-            t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-            q = sa.select(t.c.台番号).where(
-                t.c.機種 == machine, t.c.date.between(start, end)
-            ).distinct().order_by(t.c.台番号)
-            with eng.connect() as conn:
-                vals = [r[0] for r in conn.execute(q) if r[0] is not None]
-            # Int64やfloat混在を避けて整数表示
-            return [int(v) for v in vals]
+        base = alt.Chart(df_avg).mark_line().encode(
+            x="date:T",
+            y=alt.Y("plot_val:Q", axis=y_axis),
+            tooltip=[alt.Tooltip("date:T", title="日付"),
+                     alt.Tooltip("plot_val:Q", title="値", format=val_tooltip_format)]
+        ).properties(height=420)
 
-        slots = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
-        if not slots:
-            st.warning("台番号のデータが見つかりません")
-            st.stop()
-        slot_sel = st.selectbox("台番号", slots)
-        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
-        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
-
-    # 設定ライン
-    thresholds = setting_map.get(machine_sel, {})
-    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) if thresholds else pd.DataFrame(columns=["setting","value"])
-
-    legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
-
-    # 0は0、>0は 1/x 表示（安全に）
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
-    )
-
-    base = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
-        y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=[
-            alt.Tooltip("date:T", title="日付"),
-            alt.Tooltip("plot_val:Q", title="値", format=".4f")
-        ],
-    ).properties(height=400)
-
-    if not df_rules.empty:
-        rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
-        ).add_selection(legend_sel)
-        chart = base + rules
-    else:
         chart = base
+        if not df_rules.empty:
+            rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
+                y="value:Q",
+                color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"))
+            )
+            chart = chart + rules
 
-    st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
+        chart = build_hot_background(vis_start, vis_end) + chart
+        st.subheader(f"📈 全台平均 合成確率 | {machine_sel}")
+        st.altair_chart(chart, use_container_width=True)
+
+    # -------------- 単台 --------------
+    @st.cache_data
+    def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
+        t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
+        q = sa.select(t.c.台番号).where(
+            t.c.機種 == machine, t.c.date.between(start, end)
+        ).distinct().order_by(t.c.台番号)
+        with eng.connect() as conn:
+            vals = [r[0] for r in conn.execute(q) if r[0] is not None]
+        return [int(v) for v in vals]
+
+    slots_all = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
+
+    with tab_single:
+        if not slots_all:
+            st.info("台番号のデータがありません")
+        else:
+            slot_sel = st.selectbox("台番号を選択", slots_all)
+            df_single = df[df["台番号"] == slot_sel].rename(columns={"合成確率":"plot_val"})
+            base = alt.Chart(df_single).mark_line().encode(
+                x="date:T",
+                y=alt.Y("plot_val:Q", axis=y_axis),
+                tooltip=[alt.Tooltip("date:T", title="日付"),
+                         alt.Tooltip("plot_val:Q", title="値", format=val_tooltip_format)]
+            ).properties(height=420)
+
+            chart = base
+            if not df_rules.empty:
+                rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
+                    y="value:Q",
+                    color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"))
+                )
+                chart = chart + rules
+
+            chart = build_hot_background(vis_start, vis_end) + chart
+            st.subheader(f"📈 合成確率 | {machine_sel} | 台 {slot_sel}")
+            st.altair_chart(chart, use_container_width=True)
+
+    # -------------- 複数台比較 --------------
+    with tab_multi:
+        if not slots_all:
+            st.info("台番号のデータがありません")
+        else:
+            compare_slots = st.multiselect("比較する台番号（最大6台）", options=slots_all, default=slots_all[:min(3,len(slots_all))], max_selections=6)
+            if compare_slots:
+                df_multi = df[df["台番号"].isin(compare_slots)].rename(columns={"合成確率":"plot_val"})
+                base = alt.Chart(df_multi).mark_line().encode(
+                    x="date:T",
+                    y=alt.Y("plot_val:Q", axis=y_axis),
+                    color=alt.Color("台番号:N", legend=alt.Legend(title="台番号")),
+                    tooltip=[alt.Tooltip("date:T", title="日付"),
+                             alt.Tooltip("台番号:N", title="台"),
+                             alt.Tooltip("plot_val:Q", title="値", format=val_tooltip_format)]
+                ).properties(height=420)
+
+                chart = base
+                if not df_rules.empty:
+                    rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
+                        y="value:Q",
+                        color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン"))
+                    )
+                    chart = chart + rules
+
+                chart = build_hot_background(vis_start, vis_end) + chart
+                st.subheader(f"📈 合成確率 比較 | {machine_sel} | 台 {', '.join(map(str, compare_slots))}")
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.info("台番号を選択してください。")
+
+    # ========== 抽出結果のダウンロード ==========
+    # 表示期間・機種で抽出した「元DF」をそのままDL（のちの加工に使えるように）
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "この期間・機種のデータをCSVでダウンロード",
+        data=csv_bytes,
+        file_name=f"{table_name}_{machine_sel}_{vis_start}_{vis_end}.csv",
+        mime="text/csv"
+    )
