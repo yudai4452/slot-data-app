@@ -60,7 +60,6 @@ if eng is None:
     st.stop()
 
 # ======================== カラム定義マッピング ========================
-# 「最大持ち玉」と「最大持玉」の表記ゆれを両方吸収
 COLUMN_MAP = {
     "メッセ武蔵境": {
         "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
@@ -107,7 +106,7 @@ def list_csv_recursive(folder_id: str):
                 break
     return all_files
 
-# ======================== メタ情報解析（正規表現で日付抽出） ========================
+# ======================== メタ情報解析 ========================
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 def parse_meta(path: str):
@@ -132,7 +131,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
         ser = df[col].astype(str)
         mask_div = ser.str.contains("/", na=False)
 
-        # "1/x" 形式
         if mask_div.any():
             denom = pd.to_numeric(
                 ser[mask_div].str.split("/", expand=True)[1],
@@ -142,7 +140,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
-        # 数値直書き（>1 は 1/値, <=1 はそのまま）
         num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
@@ -151,7 +148,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # 整数カラム
     int_cols = [
         "台番号", "累計スタート", "スタート回数", "BB回数",
         "RB回数", "ART回数", "最大持玉", "最大差玉", "前日最終スタート"
@@ -172,11 +168,11 @@ def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
         encoding="shift_jis",
         usecols=usecols,
         on_bad_lines="skip",
-        engine="python",  # on_bad_lines を有効化
+        engine="python",
     )
     return normalize(df_raw, store)
 
-# ======================== import_log（差分取り込み用） ========================
+# ======================== import_log（差分取り込み） ========================
 def ensure_import_log_table():
     meta = sa.MetaData()
     insp = inspect(eng)
@@ -310,7 +306,7 @@ def process_one_file(file_meta: dict) -> dict | None:
         if store not in COLUMN_MAP:
             return None
 
-        drv = make_drive()  # スレッド毎に生成
+        drv = make_drive()
         raw = drv.files().get_media(fileId=file_meta["id"]).execute()
         df = load_and_normalize(raw, store)
         if df.empty:
@@ -340,7 +336,6 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
     errors = []
     bucket: dict[str, list[dict]] = defaultdict(list)
 
-    # 1) 並列でダウンロード＆正規化
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(process_one_file, f): f for f in targets}
         for fut in as_completed(futures):
@@ -353,7 +348,6 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
             bucket[res["table_name"]].append(res)
             status.text(f"処理完了: {res['path']}")
 
-    # 2) DB書き込み（テーブル単位）
     for table_name, items in bucket.items():
         if table_name not in created_tables:
             tbl = ensure_store_table(items[0]["store"])
@@ -411,7 +405,7 @@ if mode == "📥 データ取り込み":
         "🚀 本番用":   "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl",
     }
 
-    # デフォルトを「🚀 本番用」に固定（順序に依存しない）
+    # デフォルトを「🚀 本番用」に固定
     options = list(folder_options.keys())
     default_idx = options.index("🚀 本番用") if "🚀 本番用" in options else 0
     sel_label = st.selectbox("フォルダタイプ", options, index=default_idx, key="folder_type")
@@ -447,13 +441,11 @@ if mode == "📥 データ取り込み":
             st.success("差分はありません（すべて最新）")
             st.stop()
 
-        # 古い日付から順に処理（任意）
         all_targets.sort(key=lambda f: parse_meta(f["path"])[2])
 
-        # バッチに分割
         batches = [all_targets[i:i+max_files] for i in range(0, len(all_targets), max_files)]
         if not auto_batch:
-            batches = batches[:1]  # 1回分だけ
+            batches = batches[:1]
 
         total_files = sum(len(b) for b in batches[:int(max_batches)])
         done_files = 0
@@ -464,7 +456,6 @@ if mode == "📥 データ取り込み":
         for bi, batch in enumerate(batches[:int(max_batches)], start=1):
             status.text(f"バッチ {bi}/{len(batches)}（{len(batch)} 件）を処理中…")
             entries, errors, processed_files = run_import_for_targets(batch, workers, use_copy)
-            # バッチごとに log 反映（途中で中断しても “続きから”動く）
             upsert_import_log(entries)
             all_errors.extend(errors)
 
@@ -489,7 +480,6 @@ if mode == "📥 データ取り込み":
 if mode == "📊 可視化":
     st.header("DB 可視化")
 
-    # テーブル一覧
     try:
         with eng.connect() as conn:
             tables = [r[0] for r in conn.execute(sa.text(
@@ -510,7 +500,6 @@ if mode == "📊 可視化":
 
     tbl = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
 
-    # 最小/最大日付
     with eng.connect() as conn:
         row = conn.execute(sa.text(f"SELECT MIN(date), MAX(date) FROM {table_name}")).first()
         min_date, max_date = (row or (None, None))
@@ -524,11 +513,10 @@ if mode == "📊 可視化":
         "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
     )
     vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_date,  # ← 修正済み
+        "終了日", value=max_date, min_value=min_date, max_value=max_date,
         key=f"visual_end_{table_name}"
     )
 
-    # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
     needed_cols = tuple(c.name for c in tbl.c)
 
     @st.cache_data
@@ -586,13 +574,13 @@ if mode == "📊 可視化":
         df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-    # 設定ライン
     thresholds = setting_map.get(machine_sel, {})
-    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) if thresholds else pd.DataFrame(columns=["setting","value"])
+    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
+               if thresholds else pd.DataFrame(columns=["setting","value"])
 
-    legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
+    # Altair v5: selection_point + add_params
+    legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # 0は0、>0は 1/x 表示（安全に）
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
@@ -612,11 +600,4 @@ if mode == "📊 可視化":
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
             y="value:Q",
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0))
-        ).add_selection(legend_sel)
-        chart = base + rules
-    else:
-        chart = base
-
-    st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
+            opacity=alt.condition(legend_sel, alt.value_
