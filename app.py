@@ -600,4 +600,11 @@ if mode == "📊 可視化":
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
             y="value:Q",
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value_
+            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
+        )
+        chart = (base + rules).add_params(legend_sel)
+    else:
+        chart = base
+
+    st.subheader(title)
+    st.altair_chart(chart, use_container_width=True)
