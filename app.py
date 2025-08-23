@@ -60,6 +60,7 @@ if eng is None:
     st.stop()
 
 # ======================== カラム定義マッピング ========================
+# 「最大持ち玉」と「最大持玉」の表記ゆれを両方吸収
 COLUMN_MAP = {
     "メッセ武蔵境": {
         "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
@@ -93,6 +94,7 @@ def list_csv_recursive(folder_id: str):
         while True:
             res = drive.files().list(
                 q=f"'{fid}' in parents and trashed=false",
+                # md5Checksum / modifiedTime / size を取得して差分判定に使う
                 fields="nextPageToken, files(id,name,mimeType,md5Checksum,modifiedTime,size)",
                 pageSize=1000, pageToken=page_token
             ).execute()
@@ -106,7 +108,7 @@ def list_csv_recursive(folder_id: str):
                 break
     return all_files
 
-# ======================== メタ情報解析 ========================
+# ======================== メタ情報解析（正規表現で日付抽出） ========================
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 def parse_meta(path: str):
@@ -138,11 +140,12 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
                 errors="coerce"
             )
             val = 1.0 / denom
+            # 0, 負値, 欠損は0に
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
         # 数値直書き（>1 は 1/値, <=1 はそのまま）
-        num = pd.to_numeric(ser[ ~mask_div ], errors="coerce")
+        num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
         conv = conv.fillna(0)
@@ -150,6 +153,7 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
+    # 整数カラム
     int_cols = [
         "台番号", "累計スタート", "スタート回数", "BB回数",
         "RB回数", "ART回数", "最大持玉", "最大差玉", "前日最終スタート"
@@ -162,6 +166,7 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
 # ======================== 読み込み + 正規化 ========================
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
+    # ヘッダを見て使う列を決定
     header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
@@ -170,7 +175,7 @@ def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
         encoding="shift_jis",
         usecols=usecols,
         on_bad_lines="skip",
-        engine="c",
+        engine="python",  # on_bad_lines を有効にするため python エンジン
     )
     return normalize(df_raw, store)
 
@@ -219,7 +224,7 @@ def upsert_import_log(entries: list[dict]):
     with eng.begin() as conn:
         conn.execute(stmt)
 
-# ======================== テーブル作成 ========================
+# ======================== テーブル作成（台番号の追加 & 型修正） ========================
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     insp = inspect(eng)
@@ -268,11 +273,9 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
     if df.empty:
         return
 
-    # ターゲットに存在する列だけ使う（順序も固定）
     valid_cols = [c.name for c in table.c]
-    # 欲しい列 = dfに存在し、かつターゲットにも存在
     cols = [c for c in df.columns if c in valid_cols]
-    # PKが欠けていたら異常
+
     for p in pk:
         if p not in cols:
             raise ValueError(f"COPY列に主キー {p} が含まれていません")
@@ -285,8 +288,6 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
     csv_text = csv_buf.getvalue()
 
     tmp_name = f"tmp_{table.name}_{uuid4().hex[:8]}"
-
-    # SQL文字列組み立て
     cols_q = ", ".join(q(c) for c in cols)
     pk_q   = ", ".join(q(p) for p in pk)
     upd_cols = [c for c in cols if c not in pk]
@@ -298,12 +299,10 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
                  f'ON CONFLICT ({pk_q}) DO ' + ('NOTHING;' if not set_clause else f'UPDATE SET {set_clause};')
     drop_tmp_sql = f'DROP TABLE IF EXISTS {q(tmp_name)};'
 
-    # 実行
     with eng.begin() as conn:
-        # SQLAlchemy 2.0 互換のドライバ接続の取り出し
         driver_conn = getattr(conn.connection, "driver_connection", None)
         if driver_conn is None:
-            driver_conn = conn.connection.connection  # fallback
+            driver_conn = conn.connection.connection  # fallback psycopg2 connection
 
         with driver_conn.cursor() as cur:
             cur.execute(create_tmp_sql)
@@ -322,7 +321,8 @@ def process_one_file(file_meta: dict) -> dict | None:
         if store not in COLUMN_MAP:
             return None
 
-        drv = make_drive()  # スレッド毎に生成
+        # スレッド毎にDriveクライアントを生成（スレッドセーフ）
+        drv = make_drive()
         raw = drv.files().get_media(fileId=file_meta["id"]).execute()
         df = load_and_normalize(raw, store)
         if df.empty:
@@ -343,6 +343,86 @@ def process_one_file(file_meta: dict) -> dict | None:
         }
     except Exception as e:
         return {"error": f"{file_meta.get('path','(unknown)')} 処理エラー: {e}"}
+
+# ======================== 自動バッチ実行ヘルパー ========================
+def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
+    """
+    targets を並列で処理→テーブル別にまとめて書き込み
+    戻り値: (import_log_entries, errors, processed_file_count)
+    """
+    status = st.empty()
+    created_tables: dict[str, sa.Table] = {}
+    import_log_entries = []
+    errors = []
+    bucket: dict[str, list[dict]] = defaultdict(list)
+
+    # 1) 並列でダウンロード＆正規化
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(process_one_file, f): f for f in targets}
+        for fut in as_completed(futures):
+            res = fut.result()
+            if res is None:
+                continue
+            if "error" in res:
+                errors.append(res["error"])
+                continue
+            bucket[res["table_name"]].append(res)
+            status.text(f"処理完了: {res['path']}")
+
+    # 2) DB書き込み（テーブル単位）
+    for table_name, items in bucket.items():
+        # テーブル用意
+        if table_name not in created_tables:
+            tbl = ensure_store_table(items[0]["store"])
+            created_tables[table_name] = tbl
+        else:
+            tbl = created_tables[table_name]
+
+        valid_cols = [c.name for c in tbl.c]
+
+        if use_copy:
+            # COPY一括（フォールバック付き）
+            try:
+                dfs = []
+                for res in items:
+                    df = res["df"]
+                    # 足りない列は NULL で追加
+                    for c in valid_cols:
+                        if c not in df.columns:
+                            df[c] = pd.NA
+                    dfs.append(df[[c for c in df.columns if c in valid_cols]])
+                df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=valid_cols)
+                bulk_upsert_copy_merge(tbl, df_all)
+            except Exception as e:
+                errors.append(f"{table_name} COPY高速化失敗のため通常UPSERTで再試行: {e}")
+                with eng.begin() as conn:
+                    for res in items:
+                        df_one = res["df"][[c for c in res["df"].columns if c in valid_cols]]
+                        try:
+                            upsert_dataframe(conn, tbl, df_one)
+                        except Exception as ie:
+                            errors.append(f"{res['path']} 通常UPSERTでも失敗: {ie}")
+        else:
+            # 通常UPSERT（ファイル単位）
+            with eng.begin() as conn:
+                for res in items:
+                    df_one = res["df"][[c for c in res["df"].columns if c in valid_cols]]
+                    upsert_dataframe(conn, tbl, df_one)
+
+        # import_log
+        for res in items:
+            import_log_entries.append({
+                "file_id": res["file_id"],
+                "md5": res["md5"],
+                "path": res["path"],
+                "store": res["store"],
+                "machine": res["machine"],
+                "date": res["date"],
+                "rows": int(len(res["df"])),
+            })
+
+    processed_files = sum(len(v) for v in bucket.values())
+    return import_log_entries, errors, processed_files
 
 # ========================= データ取り込み =========================
 if mode == "📥 データ取り込み":
@@ -366,132 +446,67 @@ if mode == "📥 データ取り込み":
 
     use_copy = st.checkbox("DB書き込みをCOPYで高速化（推奨）", value=True,
                            help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。")
+    auto_batch = st.checkbox("最大ファイル数ごとに自動で続きのバッチも実行する", value=False)
+    max_batches = st.number_input("最大バッチ回数", min_value=1, max_value=100, value=3,
+                                  help="実行時間が長くなりすぎるのを防ぐための上限")
 
     if st.button("🚀 インポート実行", disabled=not folder_id):
         try:
             files_all = list_csv_recursive(folder_id)
-            files = [
-                f for f in files_all
-                if imp_start <= parse_meta(f['path'])[2] <= imp_end
-            ]
+            files = [f for f in files_all if imp_start <= parse_meta(f['path'])[2] <= imp_end]
         except Exception as e:
             st.error(f"ファイル一覧取得エラー: {e}")
             st.stop()
 
         imported_md5 = get_imported_md5_map()
-        targets, skipped = [], 0
-        for f in files:
-            fid = f["id"]; md5 = f.get("md5Checksum") or ""
-            if fid in imported_md5 and imported_md5[fid] == md5:
-                skipped += 1
-                continue
-            targets.append(f)
-
-        if not targets:
+        all_targets = [f for f in files if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")]
+        if not all_targets:
             st.success("差分はありません（すべて最新）")
             st.stop()
 
-        targets = targets[:max_files]
+        # 古い日付から順に処理（任意）
+        all_targets.sort(key=lambda f: parse_meta(f["path"])[2])
 
-        st.write(f"🔍 対象 CSV: **{len(targets)} 件**（スキップ {skipped} 件）")
+        # バッチに分割
+        batches = [all_targets[i:i+max_files] for i in range(0, len(all_targets), max_files)]
+        if not auto_batch:
+            batches = batches[:1]  # 1回分だけ
+
+        total_files = sum(len(b) for b in batches[:int(max_batches)])
+        done_files = 0
         bar = st.progress(0.0)
         status = st.empty()
-        created_tables: dict[str, sa.Table] = {}
-        import_log_entries = []
-        errors = []
+        all_errors = []
 
-        # 結果をテーブル単位で集約（COPY一括に使う）
-        bucket: dict[str, list[dict]] = defaultdict(list)
+        for bi, batch in enumerate(batches[:int(max_batches)], start=1):
+            status.text(f"バッチ {bi}/{len(batches)}（{len(batch)} 件）を処理中…")
+            entries, errors, processed_files = run_import_for_targets(batch, workers, use_copy)
+            # バッチごとに log 反映（途中で中断しても “続きから”動く）
+            upsert_import_log(entries)
+            all_errors.extend(errors)
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(process_one_file, f): f for f in targets}
-            done_count = 0
-            for fut in as_completed(futures):
-                done_count += 1
-                res = fut.result()
-                if res is None:
-                    bar.progress(done_count / len(futures))
-                    continue
-                if "error" in res:
-                    errors.append(res["error"])
-                    bar.progress(done_count / len(futures))
-                    continue
-
-                table_name = res["table_name"]
-                bucket[table_name].append(res)
-
-                status.text(f"処理完了: {res['path']}")
-                bar.progress(done_count / len(futures))
-
-        # 書き込みフェーズ
-        for table_name, items in bucket.items():
-            # テーブル準備
-            if table_name not in created_tables:
-                tbl = ensure_store_table(items[0]["store"])
-                created_tables[table_name] = tbl
-            else:
-                tbl = created_tables[table_name]
-
-            # valid列に揃え＆結合
-            valid_cols = [c.name for c in tbl.c]
-            dfs = []
-            for res in items:
-                df = res["df"]
-                # 足りない列は NULL で追加
-                for c in valid_cols:
-                    if c not in df.columns:
-                        df[c] = pd.NA
-                df = df[[c for c in df.columns if c in valid_cols]]
-                dfs.append(df)
-
-            df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=valid_cols)
-
-            # COPY→MERGE または 通常UPSERT
-            if use_copy:
-                try:
-                    bulk_upsert_copy_merge(tbl, df_all)
-                except Exception as e:
-                    errors.append(f"{table_name} COPY高速化失敗のため通常UPSERTで再試行: {e}")
-                    # フォールバック（ファイル単位で安全に）
-                    with eng.begin() as conn:
-                        for res in items:
-                            df_one = res["df"]
-                            df_one = df_one[[c for c in df_one.columns if c in valid_cols]]
-                            try:
-                                upsert_dataframe(conn, tbl, df_one)
-                            except Exception as ie:
-                                errors.append(f"{res['path']} 通常UPSERTでも失敗: {ie}")
-            else:
-                with eng.begin() as conn:
-                    upsert_dataframe(conn, tbl, df_all)
-
-            # import_log 追加
-            for res in items:
-                import_log_entries.append({
-                    "file_id": res["file_id"],
-                    "md5": res["md5"],
-                    "path": res["path"],
-                    "store": res["store"],
-                    "machine": res["machine"],
-                    "date": res["date"],
-                    "rows": int(len(res["df"])),
-                })
-
-        # import_log反映
-        upsert_import_log(import_log_entries)
+            done_files += processed_files
+            bar.progress(min(1.0, done_files / max(1, total_files)))
 
         status.text("")
-        if errors:
+        if len(batches) > max_batches and auto_batch:
+            remaining = sum(len(b) for b in batches[int(max_batches):])
+            st.info(f"最大バッチ回数に達しました。残り {remaining} 件は、再度ボタンを押すと続きから処理します。")
+
+        if all_errors:
             st.warning("一部でエラーが発生しました。詳細：")
-            for msg in errors[:50]:
+            for msg in all_errors[:50]:
                 st.write("- " + msg)
-            if len(errors) > 50:
-                st.write(f"... ほか {len(errors)-50} 件")
-        st.success("インポート完了！")
+            if len(all_errors) > 50:
+                st.write(f"... ほか {len(all_errors)-50} 件")
+
+        st.success(f"インポート完了（処理ファイル: {done_files} 件）！")
 
 # ========================= 可視化モード =========================
 if mode == "📊 可視化":
     st.header("DB 可視化")
+
+    # テーブル一覧
     try:
         with eng.connect() as conn:
             tables = [r[0] for r in conn.execute(sa.text(
@@ -512,6 +527,7 @@ if mode == "📊 可視化":
 
     tbl = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
 
+    # 最小/最大日付
     with eng.connect() as conn:
         row = conn.execute(sa.text(f"SELECT MIN(date), MAX(date) FROM {table_name}")).first()
         min_date, max_date = (row or (None, None))
@@ -528,6 +544,7 @@ if mode == "📊 可視化":
         "終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}"
     )
 
+    # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
     needed_cols = tuple(c.name for c in tbl.c)
 
     @st.cache_data
@@ -575,6 +592,7 @@ if mode == "📊 可視化":
             ).distinct().order_by(t.c.台番号)
             with eng.connect() as conn:
                 vals = [r[0] for r in conn.execute(q) if r[0] is not None]
+            # Int64やfloat混在を避けて整数表示
             return [int(v) for v in vals]
 
         slots = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
@@ -585,10 +603,13 @@ if mode == "📊 可視化":
         df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
+    # 設定ライン
     thresholds = setting_map.get(machine_sel, {})
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) if thresholds else pd.DataFrame(columns=["setting","value"])
+
     legend_sel = alt.selection_multi(fields=["setting"], bind="legend")
 
+    # 0は0、>0は 1/x 表示（安全に）
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
