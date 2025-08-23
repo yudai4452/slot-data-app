@@ -175,7 +175,7 @@ def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
         encoding="shift_jis",
         usecols=usecols,
         on_bad_lines="skip",
-        engine="python",  # on_bad_lines を有効にするため python エンジン
+        engine="python",  # on_bad_lines を有効化
     )
     return normalize(df_raw, store)
 
@@ -431,8 +431,12 @@ if mode == "📥 データ取り込み":
         "🧪 テスト用": "1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8",
         "🚀 本番用":   "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl",
     }
-    sel_label = st.selectbox("フォルダタイプ", list(folder_options.keys()))
-    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label])
+
+    # デフォルトを「🚀 本番用」に固定（順序に依存しない）
+    options = list(folder_options.keys())
+    default_idx = options.index("🚀 本番用") if "🚀 本番用" in options else 0
+    sel_label = st.selectbox("フォルダタイプ", options, index=default_idx, key="folder_type")
+    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
 
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
@@ -541,7 +545,7 @@ if mode == "📊 可視化":
         "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
     )
     vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}"
+        "終了日", value=max_date, min_value=min_date, max_value=max_value, key=f"visual_end_{table_name}"
     )
 
     # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
