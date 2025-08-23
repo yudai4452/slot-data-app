@@ -94,7 +94,6 @@ def list_csv_recursive(folder_id: str):
         while True:
             res = drive.files().list(
                 q=f"'{fid}' in parents and trashed=false",
-                # md5Checksum / modifiedTime / size を取得して差分判定に使う
                 fields="nextPageToken, files(id,name,mimeType,md5Checksum,modifiedTime,size)",
                 pageSize=1000, pageToken=page_token
             ).execute()
@@ -140,7 +139,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
                 errors="coerce"
             )
             val = 1.0 / denom
-            # 0, 負値, 欠損は0に
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
@@ -166,7 +164,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
 # ======================== 読み込み + 正規化 ========================
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    # ヘッダを見て使う列を決定
     header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
@@ -224,7 +221,7 @@ def upsert_import_log(entries: list[dict]):
     with eng.begin() as conn:
         conn.execute(stmt)
 
-# ======================== テーブル作成（台番号の追加 & 型修正） ========================
+# ======================== テーブル作成 ========================
 def ensure_store_table(store: str):
     safe = "slot_" + store.replace(" ", "_")
     insp = inspect(eng)
@@ -267,9 +264,6 @@ def q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機種", "台番号")):
-    """
-    dfの列だけを対象に TEMP TABLE へ COPY → target に INSERT ... ON CONFLICT DO UPDATE
-    """
     if df.empty:
         return
 
@@ -282,7 +276,6 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
 
     df_use = df[cols].copy()
 
-    # pandasのNAをNULLとして扱わせる
     csv_buf = io.StringIO()
     df_use.to_csv(csv_buf, index=False, na_rep="")
     csv_text = csv_buf.getvalue()
@@ -312,17 +305,12 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
 
 # ======================== 並列処理: ダウンロード & 正規化 ========================
 def process_one_file(file_meta: dict) -> dict | None:
-    """
-    戻り値: { "table_name": str, "df": DataFrame, "store": str, "machine": str, "date": date, "file_id": str, "md5": str, "path": str }
-    or {"error": "..."} / None（スキップ）
-    """
     try:
         store, machine, date = parse_meta(file_meta["path"])
         if store not in COLUMN_MAP:
             return None
 
-        # スレッド毎にDriveクライアントを生成（スレッドセーフ）
-        drv = make_drive()
+        drv = make_drive()  # スレッド毎に生成
         raw = drv.files().get_media(fileId=file_meta["id"]).execute()
         df = load_and_normalize(raw, store)
         if df.empty:
@@ -346,10 +334,6 @@ def process_one_file(file_meta: dict) -> dict | None:
 
 # ======================== 自動バッチ実行ヘルパー ========================
 def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
-    """
-    targets を並列で処理→テーブル別にまとめて書き込み
-    戻り値: (import_log_entries, errors, processed_file_count)
-    """
     status = st.empty()
     created_tables: dict[str, sa.Table] = {}
     import_log_entries = []
@@ -371,7 +355,6 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
 
     # 2) DB書き込み（テーブル単位）
     for table_name, items in bucket.items():
-        # テーブル用意
         if table_name not in created_tables:
             tbl = ensure_store_table(items[0]["store"])
             created_tables[table_name] = tbl
@@ -381,12 +364,10 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
         valid_cols = [c.name for c in tbl.c]
 
         if use_copy:
-            # COPY一括（フォールバック付き）
             try:
                 dfs = []
                 for res in items:
                     df = res["df"]
-                    # 足りない列は NULL で追加
                     for c in valid_cols:
                         if c not in df.columns:
                             df[c] = pd.NA
@@ -403,13 +384,11 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
                         except Exception as ie:
                             errors.append(f"{res['path']} 通常UPSERTでも失敗: {ie}")
         else:
-            # 通常UPSERT（ファイル単位）
             with eng.begin() as conn:
                 for res in items:
                     df_one = res["df"][[c for c in res["df"].columns if c in valid_cols]]
                     upsert_dataframe(conn, tbl, df_one)
 
-        # import_log
         for res in items:
             import_log_entries.append({
                 "file_id": res["file_id"],
@@ -545,7 +524,8 @@ if mode == "📊 可視化":
         "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
     )
     vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_value, key=f"visual_end_{table_name}"
+        "終了日", value=max_date, min_value=min_date, max_value=max_date,  # ← 修正済み
+        key=f"visual_end_{table_name}"
     )
 
     # キャッシュキーを安定化するために、テーブル名と必要カラム名を渡す
@@ -596,7 +576,6 @@ if mode == "📊 可視化":
             ).distinct().order_by(t.c.台番号)
             with eng.connect() as conn:
                 vals = [r[0] for r in conn.execute(q) if r[0] is not None]
-            # Int64やfloat混在を避けて整数表示
             return [int(v) for v in vals]
 
         slots = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
