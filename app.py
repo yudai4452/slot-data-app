@@ -480,6 +480,7 @@ if mode == "📥 データ取り込み":
 if mode == "📊 可視化":
     st.header("DB 可視化")
 
+    # 1) テーブル一覧
     try:
         with eng.connect() as conn:
             tables = [r[0] for r in conn.execute(sa.text(
@@ -498,82 +499,99 @@ if mode == "📊 可視化":
         st.error("テーブルが選択されていません")
         st.stop()
 
-    tbl = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
+    TBL_Q = '"' + table_name.replace('"', '""') + '"'
 
-    with eng.connect() as conn:
-        row = conn.execute(sa.text(f"SELECT MIN(date), MAX(date) FROM {table_name}")).first()
-        min_date, max_date = (row or (None, None))
+    # 2) 最小/最大日付（キャッシュ）
+    @st.cache_data(ttl=600)
+    def get_date_range(table_name: str):
+        TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        with eng.connect() as conn:
+            row = conn.execute(sa.text(f"SELECT MIN(date), MAX(date) FROM {TBL_Q}")).first()
+        return (row[0], row[1]) if row else (None, None)
 
+    min_date, max_date = get_date_range(table_name)
     if not (min_date and max_date):
         st.info("このテーブルには日付データがありません。まず取り込みを実行してください。")
         st.stop()
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input(
-        "開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}"
-    )
-    vis_end   = c2.date_input(
-        "終了日", value=max_date, min_value=min_date, max_value=max_date,
-        key=f"visual_end_{table_name}"
-    )
+    vis_start = c1.date_input("開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}")
+    vis_end   = c2.date_input("終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}")
 
-    needed_cols = tuple(c.name for c in tbl.c)
+    # 3) 高速化インデックス（任意）
+    idx_ok = st.checkbox("読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True)
+    if idx_ok:
+        try:
+            with eng.begin() as conn:
+                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date ON {TBL_Q} ("機種","date");'))
+                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date ON {TBL_Q} ("機種","台番号","date");'))
+        except Exception as e:
+            st.info(f"インデックス作成をスキップ: {e}")
 
-    @st.cache_data
-    def get_machines(table_name: str, start: dt.date, end: dt.date, _cols_key: tuple):
-        t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-        q = sa.select(t.c.機種).where(t.c.date.between(start, end)).distinct()
+    # 4) 機種一覧（キャッシュ）
+    @st.cache_data(ttl=600)
+    def get_machines_fast(table_name: str, start: dt.date, end: dt.date):
+        TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        sql = sa.text(f'SELECT DISTINCT "機種" FROM {TBL_Q} WHERE date BETWEEN :s AND :e ORDER BY "機種"')
         with eng.connect() as conn:
-            return [r[0] for r in conn.execute(q)]
+            return [r[0] for r in conn.execute(sql, {"s": start, "e": end})]
 
-    machines = get_machines(table_name, vis_start, vis_end, needed_cols)
+    machines = get_machines_fast(table_name, vis_start, vis_end)
     if not machines:
         st.warning("指定期間にデータがありません")
         st.stop()
 
     machine_sel = st.selectbox("機種選択", machines)
-    show_avg = st.checkbox("全台平均を表示")
+    show_avg = st.checkbox("全台平均を表示", value=True)
 
-    @st.cache_data
-    def get_data(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
-        t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-        q = sa.select(t).where(
-            t.c.機種 == machine,
-            t.c.date.between(start, end)
-        ).order_by(t.c.date)
-        return pd.read_sql(q, eng)
+    # 5) 台番号一覧（キャッシュ）
+    @st.cache_data(ttl=600)
+    def get_slots_fast(table_name: str, machine: str, start: dt.date, end: dt.date):
+        TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        sql = sa.text(f'SELECT DISTINCT "台番号" FROM {TBL_Q} WHERE "機種"=:m AND date BETWEEN :s AND :e AND "台番号" IS NOT NULL ORDER BY "台番号"')
+        with eng.connect() as conn:
+            vals = [r[0] for r in conn.execute(sql, {"m": machine, "s": start, "e": end})]
+        return [int(v) for v in vals if v is not None]
 
-    df = get_data(table_name, machine_sel, vis_start, vis_end, needed_cols)
-    if df.empty:
-        st.warning("データがありません")
-        st.stop()
+    # 6) プロット用データ取得（キャッシュ & 必要列だけ）
+    @st.cache_data(ttl=300)
+    def fetch_plot_avg(table_name: str, machine: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+        TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        sql = sa.text(f'''
+            SELECT date, AVG("合成確率") AS plot_val
+            FROM {TBL_Q}
+            WHERE "機種" = :m AND date BETWEEN :s AND :e
+            GROUP BY date
+            ORDER BY date
+        ''')
+        with eng.connect() as conn:
+            return pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
+
+    @st.cache_data(ttl=300)
+    def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
+        TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        sql = sa.text(f'''
+            SELECT date, "合成確率" AS plot_val
+            FROM {TBL_Q}
+            WHERE "機種" = :m AND "台番号" = :n AND date BETWEEN :s AND :e
+            ORDER BY date
+        ''')
+        with eng.connect() as conn:
+            return pd.read_sql(sql, conn, params={"m": machine, "n": int(slot), "s": start, "e": end})
 
     if show_avg:
-        df_plot = (
-            df.groupby("date", as_index=False)["合成確率"]
-              .mean()
-              .rename(columns={"合成確率": "plot_val"})
-        )
+        df_plot = fetch_plot_avg(table_name, machine_sel, vis_start, vis_end)
         title = f"📈 全台平均 合成確率 | {machine_sel}"
     else:
-        @st.cache_data
-        def get_slots(table_name: str, machine: str, start: dt.date, end: dt.date, _cols_key: tuple):
-            t = sa.Table(table_name, sa.MetaData(), autoload_with=eng)
-            q = sa.select(t.c.台番号).where(
-                t.c.機種 == machine, t.c.date.between(start, end)
-            ).distinct().order_by(t.c.台番号)
-            with eng.connect() as conn:
-                vals = [r[0] for r in conn.execute(q) if r[0] is not None]
-            return [int(v) for v in vals]
-
-        slots = get_slots(table_name, machine_sel, vis_start, vis_end, needed_cols)
+        slots = get_slots_fast(table_name, machine_sel, vis_start, vis_end)
         if not slots:
             st.warning("台番号のデータが見つかりません")
             st.stop()
         slot_sel = st.selectbox("台番号", slots)
-        df_plot = df[df["台番号"] == slot_sel].rename(columns={"合成確率": "plot_val"})
+        df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
+    # 7) 設定ライン
     thresholds = setting_map.get(machine_sel, {})
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
                if thresholds else pd.DataFrame(columns=["setting","value"])
@@ -581,6 +599,7 @@ if mode == "📊 可視化":
     # Altair v5: selection_point + add_params
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
+    # 0は0、>0は 1/x 表示
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
