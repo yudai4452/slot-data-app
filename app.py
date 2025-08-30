@@ -606,17 +606,18 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ✅ X軸を年月表示に固定し、見切れを防ぐ
+    # X軸：年月表示 + 見切れ防止
     x_axis = alt.Axis(
         title="日付",
-        format="%Y-%m",     # 例: 2025-01
+        format="%Y-%m",
         labelAngle=0,
         labelPadding=6,
         labelOverlap=True,
-        labelBound=True,    # 端のラベル切れ防止
+        labelBound=True,
     )
-    x_scale = alt.Scale(nice="month")  # 月境界で見やすく
+    x_scale = alt.Scale(nice="month")
 
+    # 🔧 base には padding を付けない（LayerChart 配下禁止のため）
     base = alt.Chart(df_plot).mark_line().encode(
         x=alt.X("date:T", axis=x_axis, scale=x_scale),
         y=alt.Y("plot_val:Q", axis=y_axis),
@@ -624,10 +625,7 @@ if mode == "📊 可視化":
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
-    ).properties(
-        height=400,
-        padding={"left": 8, "right": 8, "top": 8, "bottom": 50},  # 下余白を多めに
-    )
+    ).properties(height=400)
 
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
@@ -638,6 +636,9 @@ if mode == "📊 可視化":
         chart = (base + rules).add_params(legend_sel)
     else:
         chart = base
+
+    # ✅ padding は最終チャート側にのみ付与（LayerChart/Chart のトップレベル）
+    chart = chart.properties(padding={"left": 8, "right": 8, "top": 8, "bottom": 50})
 
     st.subheader(title)
     st.altair_chart(chart, use_container_width=True)
