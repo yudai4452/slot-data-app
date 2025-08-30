@@ -599,21 +599,35 @@ if mode == "📊 可視化":
     # Altair v5: selection_point + add_params
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # 0は0、>0は 1/x 表示
+    # Y軸（1/x表記）
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
+    # ✅ X軸を年月表示に固定し、見切れを防ぐ
+    x_axis = alt.Axis(
+        title="日付",
+        format="%Y-%m",     # 例: 2025-01
+        labelAngle=0,
+        labelPadding=6,
+        labelOverlap=True,
+        labelBound=True,    # 端のラベル切れ防止
+    )
+    x_scale = alt.Scale(nice="month")  # 月境界で見やすく
+
     base = alt.Chart(df_plot).mark_line().encode(
-        x="date:T",
+        x=alt.X("date:T", axis=x_axis, scale=x_scale),
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
-            alt.Tooltip("date:T", title="日付"),
+            alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
-    ).properties(height=400)
+    ).properties(
+        height=400,
+        padding={"left": 8, "right": 8, "top": 8, "bottom": 50},  # 下余白を多めに
+    )
 
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
