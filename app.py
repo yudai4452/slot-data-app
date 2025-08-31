@@ -569,10 +569,7 @@ if mode == "📊 可視化":
         ''')
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"]).dt.date
-        return df
-
+        return df  # date は SQL から datetime64[ns] で来る
     @st.cache_data(ttl=300)
     def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
@@ -584,8 +581,6 @@ if mode == "📊 可視化":
         ''')
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "n": int(slot), "s": start, "e": end})
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"]).dt.date
         return df
 
     if show_avg:
@@ -604,6 +599,16 @@ if mode == "📊 可視化":
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
         st.stop()
 
+    # ===== X軸を実データ範囲に固定（空白除去） =====
+    df_plot["date"] = pd.to_datetime(df_plot["date"])
+    xdomain_start = df_plot["date"].min()
+    xdomain_end   = df_plot["date"].max()
+    if pd.isna(xdomain_start) or pd.isna(xdomain_end):
+        st.info("表示対象の期間に日付がありません。")
+        st.stop()
+    if xdomain_start == xdomain_end:
+        xdomain_end = xdomain_end + pd.Timedelta(days=1)
+
     # 7) 設定ライン
     thresholds = setting_map.get(machine_sel, {})
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
@@ -618,23 +623,23 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ===== ベースチャート：X軸は毎日「日」だけ。tickCountは指定せず自動間引き =====
+    # ===== ベースチャート：日付ラベルは月初のみ M/D、他は D。自動間引き。=====
     x_axis_days = alt.Axis(
         title="日付",
-        labelExpr="''+date(datum.value)",  # 1,2,3,...
+        labelExpr="date(datum.value)==1 ? timeFormat(datum.value,'%-m/%-d') : timeFormat(datum.value,'%-d')",
         labelAngle=0,
         labelPadding=6,
         labelOverlap=True,
         labelBound=True,
     )
-    x_scale = alt.Scale(nice="day")
-    x_field = alt.X("yearmonthdate(date):T", axis=x_axis_days, scale=x_scale)
+    x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
+    x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
 
     base = alt.Chart(df_plot).mark_line().encode(
         x=x_field,
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
-            alt.Tooltip("yearmonthdate(date):T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
     ).properties(height=400, width='container')
@@ -649,37 +654,38 @@ if mode == "📊 可視化":
     else:
         main_chart = base.properties(width='container')
 
-    # ===== ストリップ：月・年を各1回だけ表示 =====
+    # ===== ストリップ：月と年を各1回だけ（実データ範囲に合わせる）=====
     def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
         s = start.replace(day=1)
         rng = pd.date_range(s, end, freq="MS")
-        return pd.DataFrame({"date": rng.date, "label": [f"{d.month}月" for d in rng]})
+        return pd.DataFrame({"date": rng, "label": [f"{d.month}月" for d in rng]})
 
     def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
         y0 = start.replace(month=1, day=1)
-        rng = pd.date_range(y0, end, freq="YS")  # ← AS → YS に修正
-        return pd.DataFrame({"date": rng.date, "label": [f"{d.year}年" for d in rng]})
+        rng = pd.date_range(y0, end, freq="YS")
+        return pd.DataFrame({"date": rng, "label": [f"{d.year}年" for d in rng]})
 
-    df_month = month_starts(vis_start, vis_end)
-    df_year  = year_starts(vis_start, vis_end)
+    df_month = month_starts(xdomain_start.date(), xdomain_end.date())
+    df_year  = year_starts(xdomain_start.date(), xdomain_end.date())
 
     month_text = alt.Chart(df_month).mark_text(baseline="top").encode(
-        x=alt.X("yearmonthdate(date):T", axis=None),
+        x=alt.X("date:T", axis=None),
         y=alt.value(22),
         text="label:N"
     ).properties(width='container')
 
     year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
-        x=alt.X("yearmonthdate(date):T", axis=None),
+        x=alt.X("date:T", axis=None),
         y=alt.value(6),
         text="label:N"
     ).properties(width='container')
 
     strip = (year_text + month_text).properties(height=28, width='container')
 
-    # ===== 連結（X共有）— vconcat には width を付けない =====
+    # ===== 連結（X共有）。余白を詰める =====
     final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
-        padding={"left": 8, "right": 8, "top": 8, "bottom": 8}
+        padding={"left": 8, "right": 8, "top": 8, "bottom": 8},
+        bounds="flush",
     )
 
     st.subheader(title)
