@@ -637,7 +637,7 @@ if mode == "📊 可視化":
             alt.Tooltip("yearmonthdate(date):T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
-    ).properties(height=400, width='container')  # ← 子チャートに width を設定
+    ).properties(height=400, width='container')
 
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
@@ -657,7 +657,7 @@ if mode == "📊 可視化":
 
     def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
         y0 = start.replace(month=1, day=1)
-        rng = pd.date_range(y0, end, freq="AS")
+        rng = pd.date_range(y0, end, freq="YS")  # ← AS → YS に修正
         return pd.DataFrame({"date": rng.date, "label": [f"{d.year}年" for d in rng]})
 
     df_month = month_starts(vis_start, vis_end)
@@ -667,17 +667,17 @@ if mode == "📊 可視化":
         x=alt.X("yearmonthdate(date):T", axis=None),
         y=alt.value(22),
         text="label:N"
-    )
+    ).properties(width='container')
 
     year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
         x=alt.X("yearmonthdate(date):T", axis=None),
         y=alt.value(6),
         text="label:N"
-    )
+    ).properties(width='container')
 
-    strip = (year_text + month_text).properties(height=28, width='container')  # ← 子チャートに width
+    strip = (year_text + month_text).properties(height=28, width='container')
 
-    # ===== 連結（X共有）。vconcat 自体には width を付けない =====
+    # ===== 連結（X共有）— vconcat には width を付けない =====
     final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
         padding={"left": 8, "right": 8, "top": 8, "bottom": 8}
     )
