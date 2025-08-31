@@ -409,7 +409,7 @@ if mode == "📥 データ取り込み":
     options = list(folder_options.keys())
     default_idx = options.index("🚀 本番用") if "🚀 本番用" in options else 0
     sel_label = st.selectbox("フォルダタイプ", options, index=default_idx, key="folder_type")
-    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
+    folder_id = st.text入力 = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
 
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
@@ -494,7 +494,7 @@ if mode == "📊 可視化":
         st.info("まず取り込みモードでデータを入れてください。")
         st.stop()
 
-    # ★ デフォルトを slot_プレゴ立川 に
+    # デフォルトを slot_プレゴ立川 に
     default_table = "slot_プレゴ立川"
     default_index = next((i for i, t in enumerate(tables) if t == default_table), 0)
 
@@ -522,7 +522,7 @@ if mode == "📊 可視化":
     vis_start = c1.date_input("開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}")
     vis_end   = c2.date_input("終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}")
 
-    # 3) 高速化インデックス（任意）
+    # 3) インデックス（任意）
     idx_ok = st.checkbox("読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True, key="create_index")
     if idx_ok:
         try:
@@ -571,7 +571,8 @@ if mode == "📊 可視化":
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
         if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
+            # ← ここがポイント：Pythonのdate型に
+            df["date"] = pd.to_datetime(df["date"]).dt.date
         return df
 
     @st.cache_data(ttl=300)
@@ -586,7 +587,7 @@ if mode == "📊 可視化":
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "n": int(slot), "s": start, "e": end})
         if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
+            df["date"] = pd.to_datetime(df["date"]).dt.date
         return df
 
     if show_avg:
@@ -619,7 +620,7 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ✅ X軸：毎日「日」を表示。各月1日だけ「日＋改行＋月」、年初1/1だけ「日＋改行＋月＋改行＋年」
+    # ✅ X軸：毎日=日。月初は「日\n月」、年初は「日\n月\n年」
     days_count = (vis_end - vis_start).days + 1
     x_axis = alt.Axis(
         title="日付",
@@ -638,11 +639,14 @@ if mode == "📊 可視化":
     )
     x_scale = alt.Scale(nice="day")
 
+    # ★ x は yearmonthdate(date):T（日単位で安定）
+    x_field = alt.X("yearmonthdate(date):T", axis=x_axis, scale=x_scale)
+
     base = alt.Chart(df_plot).mark_line().encode(
-        x=alt.X("date:T", axis=x_axis, scale=x_scale),
+        x=x_field,
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
-            alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("yearmonthdate(date):T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
     ).properties(height=400)
