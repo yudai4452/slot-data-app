@@ -494,7 +494,11 @@ if mode == "📊 可視化":
         st.info("まず取り込みモードでデータを入れてください。")
         st.stop()
 
-    table_name = st.selectbox("テーブル選択", tables, key="table_select")
+    # ★ デフォルトを slot_プレゴ立川 に
+    default_table = "slot_プレゴ立川"
+    default_index = next((i for i, t in enumerate(tables) if t == default_table), 0)
+
+    table_name = st.selectbox("テーブル選択", tables, index=default_index, key="table_select")
     if not table_name:
         st.error("テーブルが選択されていません")
         st.stop()
@@ -597,7 +601,6 @@ if mode == "📊 可視化":
         df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-    # 追加の安全策：データが空なら明示
     if df_plot is None or df_plot.empty:
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
         st.stop()
@@ -607,7 +610,6 @@ if mode == "📊 可視化":
     df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
                if thresholds else pd.DataFrame(columns=["setting","value"])
 
-    # Altair v5: selection_point + add_params
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
     # Y軸（1/x表記）
@@ -617,23 +619,23 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ✅ X軸の動的ラベル（宣言文なし・1行式）
-    #   - 年初(1/1)  → 年（例: 2025）
-    #   - 各月初(1日) → 月（例: 8）
-    #   - それ以外    → 日（例: 15）
+    # ✅ X軸：毎日「日」を表示。各月1日だけ「日＋改行＋月」、年初1/1だけ「日＋改行＋月＋改行＋年」
+    days_count = (vis_end - vis_start).days + 1
     x_axis = alt.Axis(
         title="日付",
         labelExpr=(
-            "(date(datum.value)==1) ? "
-            "((month(datum.value)==0) ? (''+year(datum.value)) : (''+(month(datum.value)+1))) "
-            ": (''+date(datum.value))"
+            "(date(datum.value)==1)"
+            " ? ((month(datum.value)==0)"
+            "     ? (timeFormat(datum.value,'%-d')+'\\n'+timeFormat(datum.value,'%-m')+'月'+'\\n'+timeFormat(datum.value,'%Y年'))"
+            "     : (timeFormat(datum.value,'%-d')+'\\n'+timeFormat(datum.value,'%-m')+'月'))"
+            " : timeFormat(datum.value,'%-d')"
         ),
+        tickCount=days_count,
         labelAngle=0,
-        labelPadding=6,
-        labelOverlap=True,
+        labelPadding=8,
+        labelOverlap=False,
         labelBound=True,
     )
-    # 日単位で nice（長期間では自動間引き）
     x_scale = alt.Scale(nice="day")
 
     base = alt.Chart(df_plot).mark_line().encode(
@@ -655,6 +657,6 @@ if mode == "📊 可視化":
     else:
         chart = base
 
-    chart = chart.properties(padding={"left": 8, "right": 8, "top": 8, "bottom": 50})
+    chart = chart.properties(padding={"left": 8, "right": 8, "top": 8, "bottom": 80})
     st.subheader(title)
     st.altair_chart(chart, use_container_width=True)
