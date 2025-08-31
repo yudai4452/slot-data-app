@@ -405,11 +405,10 @@ if mode == "📥 データ取り込み":
         "🚀 本番用":   "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl",
     }
 
-    # デフォルトを「🚀 本番用」に固定
     options = list(folder_options.keys())
     default_idx = options.index("🚀 本番用") if "🚀 本番用" in options else 0
     sel_label = st.selectbox("フォルダタイプ", options, index=default_idx, key="folder_type")
-    folder_id = st.text入力 = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
+    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
 
     c1, c2 = st.columns(2)
     imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
@@ -571,7 +570,6 @@ if mode == "📊 可視化":
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
         if not df.empty:
-            # ← ここがポイント：Pythonのdate型に
             df["date"] = pd.to_datetime(df["date"]).dt.date
         return df
 
@@ -620,27 +618,19 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ✅ X軸：毎日=日。月初は「日\n月」、年初は「日\n月\n年」
+    # ===== ベースチャート：X軸は毎日「日」だけ =====
     days_count = (vis_end - vis_start).days + 1
-    x_axis = alt.Axis(
+    x_axis_days = alt.Axis(
         title="日付",
-        labelExpr=(
-            "(date(datum.value)==1)"
-            " ? ((month(datum.value)==0)"
-            "     ? (timeFormat(datum.value,'%-d')+'\\n'+timeFormat(datum.value,'%-m')+'月'+'\\n'+timeFormat(datum.value,'%Y年'))"
-            "     : (timeFormat(datum.value,'%-d')+'\\n'+timeFormat(datum.value,'%-m')+'月'))"
-            " : timeFormat(datum.value,'%-d')"
-        ),
+        labelExpr="''+date(datum.value)",  # 1,2,3,...
         tickCount=days_count,
         labelAngle=0,
-        labelPadding=8,
-        labelOverlap=False,
+        labelPadding=6,
+        labelOverlap=True,
         labelBound=True,
     )
     x_scale = alt.Scale(nice="day")
-
-    # ★ x は yearmonthdate(date):T（日単位で安定）
-    x_field = alt.X("yearmonthdate(date):T", axis=x_axis, scale=x_scale)
+    x_field = alt.X("yearmonthdate(date):T", axis=x_axis_days, scale=x_scale)
 
     base = alt.Chart(df_plot).mark_line().encode(
         x=x_field,
@@ -657,10 +647,46 @@ if mode == "📊 可視化":
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
         )
-        chart = (base + rules).add_params(legend_sel)
+        main_chart = (base + rules).add_params(legend_sel)
     else:
-        chart = base
+        main_chart = base
 
-    chart = chart.properties(padding={"left": 8, "right": 8, "top": 8, "bottom": 80})
+    # ===== 追加ストリップ：月と年を1回だけ表示（改行不要で見やすい）=====
+    def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
+        s = start.replace(day=1)
+        rng = pd.date_range(s, end, freq="MS")
+        return pd.DataFrame({"date": rng.date, "label": [f"{d.month}月" for d in rng]})
+
+    def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
+        y0 = start.replace(month=1, day=1)
+        rng = pd.date_range(y0, end, freq="AS")
+        return pd.DataFrame({"date": rng.date, "label": [f"{d.year}年" for d in rng]})
+
+    df_month = month_starts(vis_start, vis_end)
+    df_year  = year_starts(vis_start, vis_end)
+
+    month_text = alt.Chart(df_month).mark_text(
+        baseline="middle"
+    ).encode(
+        x=alt.X("yearmonthdate(date):T", axis=None),
+        y=alt.value(16),
+        text="label:N"
+    )
+
+    year_text = alt.Chart(df_year).mark_text(
+        baseline="bottom"
+    ).encode(
+        x=alt.X("yearmonthdate(date):T", axis=None),
+        y=alt.value(4),
+        text="label:N"
+    )
+
+    strip = (year_text + month_text).properties(height=28)
+
+    # ===== 縦に連結して完成（Xスケール共有）=====
+    final = alt.vconcat(strip, main_chart).resolve_scale(x="shared").properties(
+        padding={"left": 8, "right": 8, "top": 8, "bottom": 8}
+    )
+
     st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(final, use_container_width=True)
