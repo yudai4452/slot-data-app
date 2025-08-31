@@ -618,12 +618,10 @@ if mode == "📊 可視化":
         labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # ===== ベースチャート：X軸は毎日「日」だけ =====
-    days_count = (vis_end - vis_start).days + 1
+    # ===== ベースチャート：X軸は毎日「日」だけ。tickCountは指定せず自動間引き =====
     x_axis_days = alt.Axis(
         title="日付",
         labelExpr="''+date(datum.value)",  # 1,2,3,...
-        tickCount=days_count,
         labelAngle=0,
         labelPadding=6,
         labelOverlap=True,
@@ -651,7 +649,7 @@ if mode == "📊 可視化":
     else:
         main_chart = base
 
-    # ===== 追加ストリップ：月と年を1回だけ表示（改行不要で見やすい）=====
+    # ===== ストリップ：月・年を各1回だけ表示 =====
     def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
         s = start.replace(day=1)
         rng = pd.date_range(s, end, freq="MS")
@@ -665,26 +663,23 @@ if mode == "📊 可視化":
     df_month = month_starts(vis_start, vis_end)
     df_year  = year_starts(vis_start, vis_end)
 
-    month_text = alt.Chart(df_month).mark_text(
-        baseline="middle"
-    ).encode(
+    month_text = alt.Chart(df_month).mark_text(baseline="top").encode(
         x=alt.X("yearmonthdate(date):T", axis=None),
-        y=alt.value(16),
+        y=alt.value(22),
         text="label:N"
     )
 
-    year_text = alt.Chart(df_year).mark_text(
-        baseline="bottom"
-    ).encode(
+    year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
         x=alt.X("yearmonthdate(date):T", axis=None),
-        y=alt.value(4),
+        y=alt.value(6),
         text="label:N"
     )
 
     strip = (year_text + month_text).properties(height=28)
 
-    # ===== 縦に連結して完成（Xスケール共有）=====
-    final = alt.vconcat(strip, main_chart).resolve_scale(x="shared").properties(
+    # ===== 連結（幅に自動フィット & X共有）=====
+    final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
+        width='container',
         padding={"left": 8, "right": 8, "top": 8, "bottom": 8}
     )
 
