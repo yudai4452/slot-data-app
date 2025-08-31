@@ -637,7 +637,7 @@ if mode == "📊 可視化":
             alt.Tooltip("yearmonthdate(date):T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
-    ).properties(height=400)
+    ).properties(height=400, width='container')  # ← 子チャートに width を設定
 
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
@@ -645,9 +645,9 @@ if mode == "📊 可視化":
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
         )
-        main_chart = (base + rules).add_params(legend_sel)
+        main_chart = (base + rules).add_params(legend_sel).properties(width='container')
     else:
-        main_chart = base
+        main_chart = base.properties(width='container')
 
     # ===== ストリップ：月・年を各1回だけ表示 =====
     def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
@@ -675,11 +675,10 @@ if mode == "📊 可視化":
         text="label:N"
     )
 
-    strip = (year_text + month_text).properties(height=28)
+    strip = (year_text + month_text).properties(height=28, width='container')  # ← 子チャートに width
 
-    # ===== 連結（幅に自動フィット & X共有）=====
+    # ===== 連結（X共有）。vconcat 自体には width を付けない =====
     final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
-        width='container',
         padding={"left": 8, "right": 8, "top": 8, "bottom": 8}
     )
 
