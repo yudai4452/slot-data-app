@@ -595,9 +595,6 @@ if mode == "📊 可視化":
         df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-    if df_plot is None or df_plot.empty:
-        st.info("この条件では表示データがありません。期間や機種を変更してください。")
-        st.stop()
 
     if df_plot is None or df_plot.empty:
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
