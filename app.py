@@ -14,23 +14,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from uuid import uuid4
 
-# ======================== 基本設定 ========================
-st.set_page_config(page_title="Slot Manager", layout="wide")
-mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"), key="mode_radio")
-st.title("🎰 Slot Data Manager & Visualizer")
+# ======================== 設定読み込み ========================
+@st.cache_data
+def load_settings() -> dict:
+    with open("setting.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
-SA_INFO = st.secrets["gcp_service_account"]
-PG_CFG  = st.secrets["connections"]["slot_db"]
+SETTINGS = load_settings()
+PG_CFG = SETTINGS["connections"]["slot_db"]
+SA_INFO = SETTINGS["gcp_service_account"]
 
-# ======================== 設定ファイル ========================
-with open("setting.json", encoding="utf-8") as f:
-    setting_map = json.load(f)
-
-# ======================== 接続 ========================
+# ======================== Drive / DB 接続 ========================
 def make_drive():
     try:
         creds = Credentials.from_service_account_info(
-            SA_INFO, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+            SA_INFO,
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
         )
         return build("drive", "v3", credentials=creds)
     except Exception as e:
@@ -47,8 +46,8 @@ drive = gdrive()
 def engine():
     try:
         url = (
-            f"postgresql+psycopg2://{PG_CFG.username}:{PG_CFG.password}"
-            f"@{PG_CFG.host}:{PG_CFG.port}/{PG_CFG.database}?sslmode=require"
+            f"postgresql+psycopg2://{PG_CFG['username']}:{PG_CFG['password']}"
+            f"@{PG_CFG['host']}:{PG_CFG['port']}/{PG_CFG['database']}?sslmode={PG_CFG.get('sslmode', 'require')}"
         )
         return sa.create_engine(url, pool_pre_ping=True)
     except Exception as e:
@@ -59,107 +58,132 @@ eng = engine()
 if eng is None:
     st.stop()
 
-# ======================== カラム定義マッピング ========================
+# ======================== Google Drive 検索 ========================
+def list_csv_recursive(folder_id: str) -> list[dict]:
+    """指定フォルダ以下の csv を全部列挙する（仮想 path 付き）"""
+    if drive is None:
+        st.error("Drive クライアントを初期化できていません。")
+        st.stop()
+
+    stack = [(folder_id, "")]
+    files: list[dict] = []
+
+    while stack:
+        fid, base = stack.pop()
+        q = f"'{fid}' in parents and trashed=false"
+        page_token = None
+        while True:
+            resp = drive.files().list(
+                q=q,
+                pageSize=1000,
+                fields="nextPageToken, files(id, name, mimeType, md5Checksum)",
+                pageToken=page_token,
+            ).execute()
+            for f in resp.get("files", []):
+                name = f["name"]
+                mime = f["mimeType"]
+                if mime == "application/vnd.google-apps.folder":
+                    stack.append((f["id"], base + name + "/"))
+                    continue
+                if not name.lower().endswith(".csv"):
+                    continue
+                files.append(
+                    {
+                        "id": f["id"],
+                        "name": name,
+                        "path": base + name,
+                        "mimeType": mime,
+                        "md5Checksum": f.get("md5Checksum") or "",
+                    }
+                )
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    return files
+
+# ======================== メタ情報抽出 ========================
+def parse_meta(path: str) -> tuple[str, str, dt.date]:
+    """
+    path から 店舗名, 機種名, 日付 を抽出する。
+    例: "プレゴ立川/マイジャグラーⅤ/slot_machine_data_2025-01-01.csv"
+    """
+    parts = path.split("/")
+    if len(parts) < 3:
+        raise ValueError(f"パス形式が想定外です: {path}")
+
+    store = parts[0]
+    machine = parts[1]
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", parts[-1])
+    if not m:
+        raise ValueError(f"ファイル名に日付(YYYY-MM-DD)が見つかりません: {parts[-1]}")
+    date = dt.datetime.strptime(m.group(1), "%Y-%m-%d").date()
+
+    return store, machine, date
+
+# ======================== カラムマッピング ========================
 COLUMN_MAP = {
     "メッセ武蔵境": {
-        "台番号":"台番号","スタート回数":"スタート回数","累計スタート":"累計スタート",
-        "BB回数":"BB回数","RB回数":"RB回数","ART回数":"ART回数",
-        "最大持ち玉":"最大持玉","最大持玉":"最大持玉",
-        "BB確率":"BB確率","RB確率":"RB確率","ART確率":"ART確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート",
-    },
-    "ジャンジャンマールゴット分倍河原": {
-        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        "最大持ち玉":"最大持玉","最大持玉":"最大持玉",
-        "BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+        "台番号": "台番号",
+        "スタート回数": "スタート回数",
+        "累計スタート": "累計スタート",
+        "BB回数": "BB回数",
+        "RB回数": "RB回数",
+        "ART回数": "ART回数",
+        "最大持ち玉": "最大持玉",
     },
     "プレゴ立川": {
-        "台番号":"台番号","累計スタート":"累計スタート","BB回数":"BB回数","RB回数":"RB回数",
-        "最大差玉":"最大差玉","BB確率":"BB確率","RB確率":"RB確率","合成確率":"合成確率",
-        "前日最終スタート":"前日最終スタート","スタート回数":"スタート回数",
+        "台番号": "台番号",
+        "総スタート": "累計スタート",
+        "BB回数": "BB回数",
+        "RB回数": "RB回数",
+        "AT/ART回数": "ART回数",
+        "最大持玉": "最大持玉",
+    },
+    "ジャンジャンマールゴット分倍河原": {
+        "台番号": "台番号",
+        "スタート": "スタート回数",
+        "累計スタート": "累計スタート",
+        "BB回数": "BB回数",
+        "RB回数": "RB回数",
+        "ART回数": "ART回数",
+        "最大持玉": "最大持玉",
     },
 }
 
-# ======================== Drive: 再帰 + ページング ========================
-@st.cache_data
-def list_csv_recursive(folder_id: str):
-    if drive is None:
-        raise RuntimeError("Drive未接続です")
-    all_files, queue = [], [(folder_id, "")]
-    while queue:
-        fid, cur = queue.pop()
-        page_token = None
-        while True:
-            res = drive.files().list(
-                q=f"'{fid}' in parents and trashed=false",
-                fields="nextPageToken, files(id,name,mimeType,md5Checksum,modifiedTime,size)",
-                pageSize=1000, pageToken=page_token
-            ).execute()
-            for f in res.get("files", []):
-                if f["mimeType"] == "application/vnd.google-apps.folder":
-                    queue.append((f["id"], f"{cur}/{f['name']}"))
-                elif f["name"].lower().endswith(".csv"):
-                    all_files.append({**f, "path": f"{cur}/{f['name']}"})
-            page_token = res.get("nextPageToken")
-            if not page_token:
-                break
-    return all_files
-
-# ======================== メタ情報解析 ========================
-DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-def parse_meta(path: str):
-    parts = path.strip("/").split("/")
-    if len(parts) < 3:
-        raise ValueError(f"パスが短すぎます: {path}")
-    store, machine = parts[-3], parts[-2]
-    m = DATE_RE.search(parts[-1])
-    if not m:
-        raise ValueError(f"ファイル名に日付(YYYY-MM-DD)が見つかりません: {parts[-1]}")
-    date = dt.date.fromisoformat(m.group(0))
-    return store, machine, date
-
-# ======================== 正規化 ========================
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
-    df = df_raw.rename(columns=COLUMN_MAP[store])
+    if store not in COLUMN_MAP:
+        raise ValueError(f"未対応店舗: {store}")
 
-    prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
-    for col in prob_cols:
+    mapping = COLUMN_MAP[store]
+
+    df = df_raw.rename(columns=mapping).copy()
+
+    required = ["台番号", "累計スタート", "BB回数", "RB回数", "ART回数", "最大持玉"]
+    for col in required:
         if col not in df.columns:
-            continue
-        ser = df[col].astype(str)
-        mask_div = ser.str.contains("/", na=False)
+            df[col] = 0
 
-        if mask_div.any():
-            denom = pd.to_numeric(
-                ser[mask_div].str.split("/", expand=True)[1],
-                errors="coerce"
-            )
-            val = 1.0 / denom
-            val[(denom <= 0) | (~denom.notna())] = 0
-            df.loc[mask_div, col] = val
+    def safe_int(x):
+        try:
+            if pd.isna(x):
+                return 0
+            s = str(x).replace(",", "").replace(" ", "").strip()
+            if s == "":
+                return 0
+            return int(float(s))
+        except Exception:
+            return 0
 
-        num = pd.to_numeric(ser[~mask_div], errors="coerce")
-        conv = num.copy()
-        conv[num > 1] = 1.0 / num[num > 1]
-        conv = conv.fillna(0)
-        df.loc[~mask_div, col] = conv
+    for col in required:
+        df[col] = df[col].map(safe_int)
 
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+    return df[required]
 
-    int_cols = [
-        "台番号", "累計スタート", "スタート回数", "BB回数",
-        "RB回数", "ART回数", "最大持玉", "最大差玉", "前日最終スタート"
-    ]
-    for col in int_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-
-    return df
-
-# ======================== 読み込み + 正規化 ========================
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
+    """
+    エンコーディングを shift_jis 固定で読み、カラムを正規化。
+    """
     header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
@@ -178,20 +202,22 @@ def ensure_import_log_table():
     insp = inspect(eng)
     if not insp.has_table("import_log"):
         t = sa.Table(
-            "import_log", meta,
-            sa.Column("file_id", sa.Text, primary_key=True),
-            sa.Column("md5", sa.Text, nullable=False),
-            sa.Column("path", sa.Text, nullable=False),
-            sa.Column("store", sa.Text, nullable=False),
-            sa.Column("machine", sa.Text, nullable=False),
+            "import_log",
+            meta,
+            sa.Column("file_id", sa.String(128), primary_key=True),
+            sa.Column("md5", sa.String(64), nullable=False),
+            sa.Column("path", sa.String(512), nullable=False),
+            sa.Column("store", sa.String(128), nullable=False),
+            sa.Column("machine", sa.String(128), nullable=False),
             sa.Column("date", sa.Date, nullable=False),
             sa.Column("rows", sa.Integer, nullable=False),
-            sa.Column("imported_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+            sa.Column("imported_at", sa.DateTime(timezone=True), nullable=False),
         )
         meta.create_all(eng)
+        return t
     else:
         t = sa.Table("import_log", meta, autoload_with=eng)
-    return t
+        return t
 
 def get_imported_md5_map():
     log = ensure_import_log_table()
@@ -206,60 +232,65 @@ def upsert_import_log(entries: list[dict]):
     stmt = pg_insert(log).values(entries)
     stmt = stmt.on_conflict_do_update(
         index_elements=[log.c.file_id],
-        set_={"md5": stmt.excluded.md5,
-              "path": stmt.excluded.path,
-              "store": stmt.excluded.store,
-              "machine": stmt.excluded.machine,
-              "date": stmt.excluded.date,
-              "rows": stmt.excluded.rows,
-              "imported_at": sa.func.now()}
+        set_={
+            "md5": stmt.excluded.md5,
+            "path": stmt.excluded.path,
+            "store": stmt.excluded.store,
+            "machine": stmt.excluded.machine,
+            "date": stmt.excluded.date,
+            "rows": stmt.excluded.rows,
+            "imported_at": stmt.excluded.imported_at,
+        },
     )
     with eng.begin() as conn:
         conn.execute(stmt)
 
-# ======================== テーブル作成 ========================
-def ensure_store_table(store: str):
-    safe = "slot_" + store.replace(" ", "_")
-    insp = inspect(eng)
+# ======================== STORE テーブル ========================
+def ensure_store_table(store: str) -> sa.Table:
+    """
+    店舗単位で 1 テーブル：
+    slot_プレゴ立川
+    """
+    table_name = "slot_" + store.replace(" ", "_")
     meta = sa.MetaData()
-    if not insp.has_table(safe):
-        cols = [
-            sa.Column("date", sa.Date, nullable=False),
-            sa.Column("機種", sa.Text, nullable=False),
-            sa.Column("台番号", sa.Integer, nullable=False),
-        ]
-        unique_cols = list(dict.fromkeys(COLUMN_MAP[store].values()))
-        numeric_int = {
-            "台番号", "累計スタート", "スタート回数", "BB回数", "RB回数",
-            "ART回数", "最大持玉", "最大差玉", "前日最終スタート"
-        }
-        for col_name in unique_cols:
-            if col_name in {"date", "機種", "台番号"}:
-                continue
-            if col_name in numeric_int:
-                cols.append(sa.Column(col_name, sa.Integer))
-            else:
-                cols.append(sa.Column(col_name, sa.Float))
-        t = sa.Table(safe, meta, *cols, sa.PrimaryKeyConstraint("date", "機種", "台番号"))
-        meta.create_all(eng)
-        return t
-    return sa.Table(safe, meta, autoload_with=eng)
+    insp = inspect(eng)
+    if insp.has_table(table_name):
+        return sa.Table(table_name, meta, autoload_with=eng)
 
-# ======================== 通常UPSERT ========================
-def upsert_dataframe(conn, table, df: pd.DataFrame, pk=("date", "機種", "台番号")):
-    rows = df.to_dict(orient="records")
-    if not rows:
+    tbl = sa.Table(
+        table_name,
+        meta,
+        sa.Column("date", sa.Date, nullable=False),
+        sa.Column("機種", sa.String(128), nullable=False),
+        sa.Column("台番号", sa.Integer, nullable=False),
+        sa.Column("累計スタート", sa.Integer, nullable=False),
+        sa.Column("BB回数", sa.Integer, nullable=False),
+        sa.Column("RB回数", sa.Integer, nullable=False),
+        sa.Column("ART回数", sa.Integer, nullable=False),
+        sa.Column("最大持玉", sa.Integer, nullable=False),
+        sa.PrimaryKeyConstraint("date", "機種", "台番号", name=f"pk_{table_name}"),
+    )
+    meta.create_all(eng)
+    return tbl
+
+# ======================== 通常 UPSERT ========================
+def upsert_dataframe(conn, table: sa.Table, df: pd.DataFrame):
+    if df.empty:
         return
-    stmt = pg_insert(table).values(rows)
-    update_cols = {c.name: stmt.excluded[c.name] for c in table.c if c.name not in pk}
-    stmt = stmt.on_conflict_do_update(index_elements=list(pk), set_=update_cols)
-    conn.execute(stmt)
 
-# ======================== COPY→MERGE 高速アップサート ========================
+    ins = pg_insert(table)
+    update_cols = [c.name for c in table.columns if c.name not in ("date", "機種", "台番号")]
+    stmt = ins.on_conflict_do_update(
+        index_elements=["date", "機種", "台番号"],
+        set_={c: ins.excluded[c] for c in update_cols},
+    )
+    conn.execute(stmt, df.to_dict(orient="records"))
+
+# ======================== COPY 高速化 ========================
 def q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
-def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機種", "台番号")):
+def bulk_upsert_copy_merge(engine: sa.Engine, table: sa.Table, df: pd.DataFrame, pk=("date", "機種", "台番号")):
     if df.empty:
         return
 
@@ -278,17 +309,19 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
 
     tmp_name = f"tmp_{table.name}_{uuid4().hex[:8]}"
     cols_q = ", ".join(q(c) for c in cols)
-    pk_q   = ", ".join(q(p) for p in pk)
+    pk_q = ", ".join(q(p) for p in pk)
     upd_cols = [c for c in cols if c not in pk]
     set_clause = ", ".join(f"{q(c)}=EXCLUDED.{q(c)}" for c in upd_cols) if upd_cols else ""
 
     create_tmp_sql = f'CREATE TEMP TABLE {q(tmp_name)} (LIKE {q(table.name)} INCLUDING ALL);'
     copy_sql = f'COPY {q(tmp_name)} ({cols_q}) FROM STDIN WITH (FORMAT csv, HEADER true);'
-    insert_sql = f'INSERT INTO {q(table.name)} ({cols_q}) SELECT {cols_q} FROM {q(tmp_name)} ' \
-                 f'ON CONFLICT ({pk_q}) DO ' + ('NOTHING;' if not set_clause else f'UPDATE SET {set_clause};')
+    insert_sql = (
+        f'INSERT INTO {q(table.name)} ({cols_q}) SELECT {cols_q} FROM {q(tmp_name)} '
+        f'ON CONFLICT ({pk_q}) DO ' + ('NOTHING;' if not set_clause else f'UPDATE SET {set_clause};')
+    )
     drop_tmp_sql = f'DROP TABLE IF EXISTS {q(tmp_name)};'
 
-    with eng.begin() as conn:
+    with engine.begin() as conn:
         driver_conn = getattr(conn.connection, "driver_connection", None)
         if driver_conn is None:
             driver_conn = conn.connection.connection  # fallback psycopg2 connection
@@ -299,15 +332,19 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
             cur.execute(insert_sql)
             cur.execute(drop_tmp_sql)
 
-# ======================== 並列処理: ダウンロード & 正規化 ========================
+# ======================== 並列処理：1ファイル ========================
 def process_one_file(file_meta: dict) -> dict | None:
     try:
         store, machine, date = parse_meta(file_meta["path"])
         if store not in COLUMN_MAP:
-            return None
+            # 未対応店舗はエラーとして記録してスキップ
+            return {"error": f"{file_meta.get('path','(unknown)')} 未対応店舗のためスキップ: {store}"}
 
-        drv = make_drive()
-        raw = drv.files().get_media(fileId=file_meta["id"]).execute()
+        if drive is None:
+            # 起動時に既にエラーを出して止めている想定だが、念のためセーフガード
+            raise RuntimeError("Drive クライアントの初期化に失敗しています。")
+
+        raw = drive.files().get_media(fileId=file_meta["id"]).execute()
         df = load_and_normalize(raw, store)
         if df.empty:
             return None
@@ -330,7 +367,7 @@ def process_one_file(file_meta: dict) -> dict | None:
 
 # ======================== 自動バッチ実行ヘルパー ========================
 def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
-    status = st.empty()
+    detail_status = st.empty()
     created_tables: dict[str, sa.Table] = {}
     import_log_entries = []
     errors = []
@@ -346,7 +383,7 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
                 errors.append(res["error"])
                 continue
             bucket[res["table_name"]].append(res)
-            status.text(f"処理完了: {res['path']}")
+            detail_status.text(f"処理完了: {res['path']}")
 
     for table_name, items in bucket.items():
         if table_name not in created_tables:
@@ -367,7 +404,7 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
                             df[c] = pd.NA
                     dfs.append(df[[c for c in df.columns if c in valid_cols]])
                 df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=valid_cols)
-                bulk_upsert_copy_merge(tbl, df_all)
+                bulk_upsert_copy_merge(eng, tbl, df_all)
             except Exception as e:
                 errors.append(f"{table_name} COPY高速化失敗のため通常UPSERTで再試行: {e}")
                 with eng.begin() as conn:
@@ -384,76 +421,129 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
                     upsert_dataframe(conn, tbl, df_one)
 
         for res in items:
-            import_log_entries.append({
-                "file_id": res["file_id"],
-                "md5": res["md5"],
-                "path": res["path"],
-                "store": res["store"],
-                "machine": res["machine"],
-                "date": res["date"],
-                "rows": int(len(res["df"])),
-            })
+            import_log_entries.append(
+                {
+                    "file_id": res["file_id"],
+                    "md5": res["md5"],
+                    "path": res["path"],
+                    "store": res["store"],
+                    "machine": res["machine"],
+                    "date": res["date"],
+                    "rows": int(len(res["df"])),
+                    "imported_at": dt.datetime.now(dt.timezone.utc),
+                }
+            )
 
     processed_files = sum(len(v) for v in bucket.values())
     return import_log_entries, errors, processed_files
 
-# ========================= データ取り込み =========================
+# ========================= Streamlit UI =========================
+st.set_page_config(page_title="Slot Data Importer", layout="wide")
+
+mode = st.sidebar.radio("モード選択", ["📥 データ取り込み", "📊 可視化"])
+
+# ========================= 取り込みモード =========================
 if mode == "📥 データ取り込み":
     st.header("Google Drive → Postgres インポート")
-    folder_options = {
-        "🧪 テスト用": "1MRQFPBahlSwdwhrqqBzudXL18y8-qOb8",
-        "🚀 本番用":   "1hX8GQRuDm_E1A1Cu_fXorvwxv-XF7Ynl",
-    }
 
+    folder_options = {
+        "🧪 テスト用": SETTINGS["import_folders"]["test"],
+        "🚀 本番用": SETTINGS["import_folders"]["prod"],
+    }
     options = list(folder_options.keys())
     default_idx = options.index("🚀 本番用") if "🚀 本番用" in options else 0
-    sel_label = st.selectbox("フォルダタイプ", options, index=default_idx, key="folder_type")
-    folder_id = st.text_input("Google Drive フォルダ ID", value=folder_options[sel_label], key="folder_id")
+    sel_label = st.selectbox("対象フォルダ", options, index=default_idx, key="folder_type")
+    folder_id = folder_options[sel_label]
 
-    c1, c2 = st.columns(2)
-    imp_start = c1.date_input("開始日", dt.date(2024, 1, 1), key="import_start_date")
-    imp_end   = c2.date_input("終了日", dt.date.today(), key="import_end_date")
+    col1, col2 = st.columns(2)
+    with col1:
+        imp_start = st.date_input("インポート対象開始日", dt.date.today() - dt.timedelta(days=7))
+    with col2:
+        imp_end = st.date_input("インポート対象終了日", dt.date.today())
 
-    c3, c4 = st.columns(2)
-    max_files = c3.slider("最大ファイル数（1回の実行上限）", 10, 2000, 300, step=10,
-                          help="大量フォルダは分割して取り込み（タイムアウト回避）", key="max_files")
-    workers = c4.slider("並列ダウンロード数", 1, 8, 4,
-                        help="並列数が多すぎるとAPI制限に当たる可能性があります", key="workers")
+    if imp_start > imp_end:
+        st.error("開始日は終了日以前にしてください")
+        st.stop()
 
-    use_copy = st.checkbox("DB書き込みをCOPYで高速化（推奨）", value=True,
-                           help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。", key="use_copy")
+    c1, c2, c3 = st.columns(3)
+    workers = c1.slider("並列ダウンロード数", 1, 16, 4)
+    use_copy = c2.checkbox(
+        "DB書き込みをCOPYで高速化（推奨）",
+        value=True,
+        help="一時テーブルにCOPY→まとめてUPSERT。失敗時は通常UPSERTに自動フォールバック。",
+        key="use_copy",
+    )
+    max_files = c3.slider(
+        "最大ファイル数（1回の実行上限）",
+        10,
+        2000,
+        300,
+        step=10,
+        help="大量フォルダは分割して取り込み（タイムアウト回避）",
+        key="max_files",
+    )
+
     auto_batch = st.checkbox("最大ファイル数ごとに自動で続きのバッチも実行する", value=False, key="auto_batch")
-    max_batches = st.number_input("最大バッチ回数", min_value=1, max_value=100, value=3,
-                                  help="実行時間が長くなりすぎるのを防ぐための上限", key="max_batches")
+    max_batches = st.number_input(
+        "最大バッチ回数（0で制限なし）",
+        min_value=0,
+        max_value=100,
+        value=3,
+        help="実行時間が長くなりすぎるのを防ぐための上限。0なら全バッチ実行。",
+        key="max_batches",
+    )
 
     if st.button("🚀 インポート実行", disabled=not folder_id, key="import_run"):
         try:
             files_all = list_csv_recursive(folder_id)
-            files = [f for f in files_all if imp_start <= parse_meta(f['path'])[2] <= imp_end]
+            files: list[dict] = []
+            skipped: list[str] = []
+            for f in files_all:
+                try:
+                    _, _, file_date = parse_meta(f["path"])
+                except ValueError as e:
+                    skipped.append(f"{f['path']}: {e}")
+                    continue
+                if imp_start <= file_date <= imp_end:
+                    files.append(f)
         except Exception as e:
             st.error(f"ファイル一覧取得エラー: {e}")
             st.stop()
 
+        if skipped:
+            st.info(f"パス形式が想定外でスキップしたファイルが {len(skipped)} 件あります。")
+
         imported_md5 = get_imported_md5_map()
-        all_targets = [f for f in files if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")]
+        all_targets = [
+            f for f in files if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")
+        ]
         if not all_targets:
             st.success("差分はありません（すべて最新）")
             st.stop()
 
         all_targets.sort(key=lambda f: parse_meta(f["path"])[2])
 
-        batches = [all_targets[i:i+max_files] for i in range(0, len(all_targets), max_files)]
-        if not auto_batch:
-            batches = batches[:1]
+        batches = [all_targets[i : i + max_files] for i in range(0, len(all_targets), max_files)]
 
-        total_files = sum(len(b) for b in batches[:int(max_batches)])
+        # 実際に処理するバッチ一覧
+        if not auto_batch:
+            # 自動バッチ OFF → 1バッチだけ
+            use_batches = batches[:1]
+        else:
+            # 自動バッチ ON → max_batches が 0 なら全バッチ、それ以外は指定数まで
+            if max_batches == 0:
+                use_batches = batches
+            else:
+                use_batches = batches[: int(max_batches)]
+
+        total_files = sum(len(b) for b in use_batches)
         done_files = 0
         bar = st.progress(0.0)
-        status = st.empty()
-        all_errors = []
+        batch_status = st.empty()
+        all_errors: list[str] = []
 
-        for bi, batch in enumerate(batches[:int(max_batches)], start=1):
-            status.text(f"バッチ {bi}/{len(batches)}（{len(batch)} 件）を処理中…")
+        for bi, batch in enumerate(use_batches, start=1):
+            batch_status.text(f"バッチ {bi}/{len(use_batches)}（{len(batch)} 件）を処理中…")
             entries, errors, processed_files = run_import_for_targets(batch, workers, use_copy)
             upsert_import_log(entries)
             all_errors.extend(errors)
@@ -461,10 +551,14 @@ if mode == "📥 データ取り込み":
             done_files += processed_files
             bar.progress(min(1.0, done_files / max(1, total_files)))
 
-        status.text("")
-        if len(batches) > max_batches and auto_batch:
-            remaining = sum(len(b) for b in batches[int(max_batches):])
-            st.info(f"最大バッチ回数に達しました。残り {remaining} 件は、再度ボタンを押すと続きから処理します。")
+        batch_status.text("")
+
+        # まだ残りがある場合だけ案内メッセージ
+        if auto_batch and max_batches > 0 and len(batches) > len(use_batches):
+            remaining = sum(len(b) for b in batches[len(use_batches) :])
+            st.info(
+                f"最大バッチ回数に達しました。残り {remaining} 件は、再度ボタンを押すと続きから処理します。"
+            )
 
         if all_errors:
             st.warning("一部でエラーが発生しました。詳細：")
@@ -482,9 +576,12 @@ if mode == "📊 可視化":
     # 1) テーブル一覧
     try:
         with eng.connect() as conn:
-            tables = [r[0] for r in conn.execute(sa.text(
-                "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
-            ))]
+            tables = [
+                r[0]
+                for r in conn.execute(
+                    sa.text("SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'")
+                )
+            ]
     except Exception as e:
         st.error(f"テーブル一覧取得エラー: {e}")
         st.stop()
@@ -493,11 +590,7 @@ if mode == "📊 可視化":
         st.info("まず取り込みモードでデータを入れてください。")
         st.stop()
 
-    # デフォルトを slot_プレゴ立川 に
-    default_table = "slot_プレゴ立川"
-    default_index = next((i for i, t in enumerate(tables) if t == default_table), 0)
-
-    table_name = st.selectbox("テーブル選択", tables, index=default_index, key="table_select")
+    table_name = st.selectbox("テーブルを選択", tables)
     if not table_name:
         st.error("テーブルが選択されていません")
         st.stop()
@@ -518,175 +611,153 @@ if mode == "📊 可視化":
         st.stop()
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}")
-    vis_end   = c2.date_input("終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}")
+    vis_start = c1.date_input(
+        "開始日",
+        value=min_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"visual_start_{table_name}",
+    )
+    vis_end = c2.date_input(
+        "終了日",
+        value=max_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"visual_end_{table_name}",
+    )
+
+    if vis_start > vis_end:
+        st.error("開始日は終了日以前にしてください")
+        st.stop()
 
     # 3) インデックス（任意）
-    idx_ok = st.checkbox("読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True, key="create_index")
+    idx_ok = st.checkbox(
+        "読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True, key="create_index"
+    )
     if idx_ok:
         try:
             with eng.begin() as conn:
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date ON {TBL_Q} ("機種","date");'))
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date ON {TBL_Q} ("機種","台番号","date");'))
+                conn.execute(
+                    sa.text(
+                        f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date ON {TBL_Q} ("機種","date");'
+                    )
+                )
+                conn.execute(
+                    sa.text(
+                        f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date ON {TBL_Q} ("機種","台番号","date");'
+                    )
+                )
         except Exception as e:
-            st.info(f"インデックス作成をスキップ: {e}")
+            st.warning(f"インデックス作成に失敗しました（処理自体は続行します）: {e}")
 
-    # 4) 機種一覧（キャッシュ）
-    @st.cache_data(ttl=600)
-    def get_machines_fast(table_name: str, start: dt.date, end: dt.date):
-        TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'SELECT DISTINCT "機種" FROM {TBL_Q} WHERE date BETWEEN :s AND :e ORDER BY "機種"')
+    # 4) データ取得
+    try:
         with eng.connect() as conn:
-            return [r[0] for r in conn.execute(sql, {"s": start, "e": end})]
-
-    machines = get_machines_fast(table_name, vis_start, vis_end)
-    if not machines:
-        st.warning("指定期間にデータがありません")
+            df = pd.read_sql(
+                sa.text(
+                    f"SELECT * FROM {TBL_Q} WHERE date BETWEEN :start AND :end ORDER BY date, 台番号"
+                ),
+                conn,
+                params={"start": vis_start, "end": vis_end},
+            )
+    except Exception as e:
+        st.error(f"データ取得エラー: {e}")
         st.stop()
 
-    machine_sel = st.selectbox("機種選択", machines, key="machine_select")
-    show_avg = st.checkbox("全台平均を表示", value=True, key="show_avg")
-
-    # 5) 台番号一覧（キャッシュ）
-    @st.cache_data(ttl=600)
-    def get_slots_fast(table_name: str, machine: str, start: dt.date, end: dt.date):
-        TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'SELECT DISTINCT "台番号" FROM {TBL_Q} WHERE "機種"=:m AND date BETWEEN :s AND :e AND "台番号" IS NOT NULL ORDER BY "台番号"')
-        with eng.connect() as conn:
-            vals = [r[0] for r in conn.execute(sql, {"m": machine, "s": start, "e": end})]
-        return [int(v) for v in vals if v is not None]
-
-    # 6) プロット用データ取得（キャッシュ & 必要列だけ）
-    @st.cache_data(ttl=300)
-    def fetch_plot_avg(table_name: str, machine: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-        TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'''
-            SELECT date, AVG("合成確率") AS plot_val
-            FROM {TBL_Q}
-            WHERE "機種" = :m AND date BETWEEN :s AND :e
-            GROUP BY date
-            ORDER BY date
-        ''')
-        with eng.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
-        return df  # date は SQL から datetime64[ns] で来る
-    @st.cache_data(ttl=300)
-    def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
-        TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'''
-            SELECT date, "合成確率" AS plot_val
-            FROM {TBL_Q}
-            WHERE "機種" = :m AND "台番号" = :n AND date BETWEEN :s AND :e
-            ORDER BY date
-        ''')
-        with eng.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"m": machine, "n": int(slot), "s": start, "e": end})
-        return df
-
-    if show_avg:
-        df_plot = fetch_plot_avg(table_name, machine_sel, vis_start, vis_end)
-        title = f"📈 全台平均 合成確率 | {machine_sel}"
-    else:
-        slots = get_slots_fast(table_name, machine_sel, vis_start, vis_end)
-        if not slots:
-            st.warning("台番号のデータが見つかりません")
-            st.stop()
-        slot_sel = st.selectbox("台番号", slots, key="slot_select")
-        df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
-        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
-
-    if df_plot is None or df_plot.empty:
-        st.info("この条件では表示データがありません。期間や機種を変更してください。")
+    if df.empty:
+        st.info("該当期間のデータがありません。")
         st.stop()
 
-    # ===== X軸を実データ範囲に固定（空白除去） =====
-    df_plot["date"] = pd.to_datetime(df_plot["date"])
-    xdomain_start = df_plot["date"].min()
-    xdomain_end   = df_plot["date"].max()
-    if pd.isna(xdomain_start) or pd.isna(xdomain_end):
-        st.info("表示対象の期間に日付がありません。")
-        st.stop()
-    if xdomain_start == xdomain_end:
-        xdomain_end = xdomain_end + pd.Timedelta(days=1)
+    with st.expander("生データを見る"):
+        st.dataframe(df)
 
-    # 7) 設定ライン
-    thresholds = setting_map.get(machine_sel, {})
-    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
-               if thresholds else pd.DataFrame(columns=["setting","value"])
+    # ===== 可視化：機種・台番号ごとの成績 =====
+    st.subheader("日別集計（BB/RB/ART/スタート）")
 
-    legend_sel = alt.selection_point(fields=["setting"], bind="legend")
-
-    # Y軸（1/x表記）
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
+    agg = (
+        df.groupby("date", as_index=False)[["累計スタート", "BB回数", "RB回数", "ART回数", "最大持玉"]]
+        .sum()
+        .sort_values("date")
     )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.dataframe(agg)
 
-    # ===== ベースチャート：日付ラベルは月初のみ M/D、他は D。自動間引き。=====
-    x_axis_days = alt.Axis(
-        title="日付",
-        labelExpr="date(datum.value)==1 ? timeFormat(datum.value,'%-m/%-d') : timeFormat(datum.value,'%-d')",
-        labelAngle=0,
-        labelPadding=6,
-        labelOverlap=True,
-        labelBound=True,
-    )
-    x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
-    x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
-
-    base = alt.Chart(df_plot).mark_line().encode(
-        x=x_field,
-        y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=[
-            alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("plot_val:Q", title="値", format=".4f")
-        ],
-    ).properties(height=400, width='container')
-
-    if not df_rules.empty:
-        rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y="value:Q",
-            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
-            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
+    with c2:
+        chart = (
+            alt.Chart(agg)
+            .mark_line(point=True)
+            .encode(
+                x="date:T",
+                y=alt.Y("累計スタート:Q", title="累計スタート"),
+                tooltip=[
+                    "date:T",
+                    "累計スタート:Q",
+                    "BB回数:Q",
+                    "RB回数:Q",
+                    "ART回数:Q",
+                    "最大持玉:Q",
+                ],
+            )
+            .properties(width="container", height=280)
         )
-        main_chart = (base + rules).add_params(legend_sel).properties(width='container')
-    else:
-        main_chart = base.properties(width='container')
+        st.altair_chart(chart, use_container_width=True)
 
-    # ===== ストリップ：月と年を各1回だけ（実データ範囲に合わせる）=====
-    def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
-        s = start.replace(day=1)
-        rng = pd.date_range(s, end, freq="MS")
-        return pd.DataFrame({"date": rng, "label": [f"{d.month}月" for d in rng]})
+    # ===== ヒートマップ：台番号 × 日付（最大持玉） =====
+    st.subheader("台番号 × 日付 ヒートマップ（最大持玉）")
+    heat_df = df[["date", "台番号", "最大持玉"]].copy()
 
-    def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
-        y0 = start.replace(month=1, day=1)
-        rng = pd.date_range(y0, end, freq="YS")
-        return pd.DataFrame({"date": rng, "label": [f"{d.year}年" for d in rng]})
-
-    df_month = month_starts(xdomain_start.date(), xdomain_end.date())
-    df_year  = year_starts(xdomain_start.date(), xdomain_end.date())
-
-    month_text = alt.Chart(df_month).mark_text(baseline="top").encode(
-        x=alt.X("date:T", axis=None),
-        y=alt.value(22),
-        text="label:N"
-    ).properties(width='container')
-
-    year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
-        x=alt.X("date:T", axis=None),
-        y=alt.value(6),
-        text="label:N"
-    ).properties(width='container')
-
-    strip = (year_text + month_text).properties(height=28, width='container')
-
-    # ===== 連結（X共有）。余白を詰める =====
-    final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
-        padding={"left": 8, "right": 8, "top": 8, "bottom": 8},
-        bounds="flush",
+    heat = (
+        alt.Chart(heat_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("date:T", title="日付"),
+            y=alt.Y("台番号:O", title="台番号"),
+            color=alt.Color("最大持玉:Q", title="最大持玉"),
+            tooltip=["date:T", "台番号:O", "最大持玉:Q"],
+        )
+        .properties(width="container", height=400)
     )
+    st.altair_chart(heat, use_container_width=True)
 
-    st.subheader(title)
-    st.altair_chart(final, use_container_width=True)
+    # ===== 単一台の詳細推移 =====
+    st.subheader("単一台の詳細推移")
+    tai_list = sorted(df["台番号"].unique())
+    tai_sel = st.selectbox("台番号を選択", ["（選択なし）"] + [str(t) for t in tai_list])
+
+    if tai_sel != "（選択なし）":
+        tai_num = int(tai_sel)
+        df_one = df[df["台番号"] == tai_num].sort_values("date")
+
+        st.write(f"台番号 {tai_num} の推移")
+
+        base = alt.Chart(df_one).encode(x="date:T")
+
+        line_start = (
+            base.mark_line(point=True)
+            .encode(
+                y=alt.Y("累計スタート:Q", title="累計スタート"),
+                tooltip=[
+                    "date:T",
+                    "累計スタート:Q",
+                    "BB回数:Q",
+                    "RB回数:Q",
+                    "ART回数:Q",
+                    "最大持玉:Q",
+                ],
+            )
+            .properties(width="container", height=240)
+        )
+        st.altair_chart(line_start, use_container_width=True)
+
+        line_max = (
+            base.mark_line(point=True)
+            .encode(
+                y=alt.Y("最大持玉:Q", title="最大持玉"),
+                tooltip=["date:T", "最大持玉:Q"],
+            )
+            .properties(width="container", height=240)
+        )
+        st.altair_chart(line_max, use_container_width=True)
+
+    st.caption("※ 可視化は必要に応じてカスタマイズしてOKです。")
