@@ -613,6 +613,18 @@ if mode == "📊 可視化":
 
     # ===== 設定ライン用データ（setting.json から） =====
     thresholds = setting_map.get(machine_sel, {})
+
+    # === STEP1: Y軸を 1/x 表記にする ===
+    y_axis = alt.Axis(
+    title="合成確率 (1/x 表記)",
+    # 0 より大きい値だけ 1/x 表記、その他は空文字
+    labelExpr=(
+        "isValid(datum.value) && datum.value > 0 "
+        "? '1/' + round(1/datum.value) "
+        ": ''"
+        ),
+    )
+    
     if thresholds:
         df_rules = pd.DataFrame(
             [{"setting": k, "value": float(v)} for k, v in thresholds.items()]
@@ -623,17 +635,16 @@ if mode == "📊 可視化":
     # ===== ベース：シンプルな折れ線グラフ =====
     base = alt.Chart(df_plot).mark_line().encode(
         x=alt.X("date:T", title="日付"),
-        y=alt.Y("plot_val:Q",
-                title="合成確率",
-                axis=alt.Axis(format=".4f")),
+        y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("plot_val:Q", title="値", format=".4f"),
+            alt.Tooltip("plot_val:Q", title="値(0-1)", format=".4f"),
         ],
     ).properties(
         height=400,
         width="container",
     )
+
 
     # ===== 設定ライン（あれば） =====
     if not df_rules.empty:
