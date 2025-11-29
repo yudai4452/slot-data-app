@@ -616,22 +616,24 @@ if mode == "📊 可視化":
 
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # Y軸（とりあえず生値で表示）
+    # Y軸（1/x表記）
     y_axis = alt.Axis(
         title="合成確率",
         format=".4f",
+        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
     )
 
-    # X軸（普通の日時フォーマット）
+    # ===== ベースチャート：日付ラベルは月初のみ M/D、他は D。自動間引き。=====
     x_axis_days = alt.Axis(
         title="日付",
-        format="%Y-%m-%d",   # 好きな書式に変えてOK
+        labelExpr="date(datum.value)==1 ? timeFormat(datum.value,'%-m/%-d') : timeFormat(datum.value,'%-d')",
         labelAngle=0,
+        labelPadding=6,
+        labelOverlap=True,
+        labelBound=True,
     )
-
     x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
     x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
-
 
     base = alt.Chart(df_plot).mark_line().encode(
         x=x_field,
