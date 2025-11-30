@@ -624,6 +624,17 @@ if mode == "📊 可視化":
         ": ''"
         ),
     )
+
+    xdomain_start = df_plot["date"].min()
+    xdomain_end   = df_plot["date"].max()
+
+    x_axis_main = alt.Axis(
+        title="日付",
+        format="%Y-%m-%d",
+        labelAngle=0,
+    )
+    x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
+
     
     if thresholds:
         df_rules = pd.DataFrame(
@@ -634,14 +645,46 @@ if mode == "📊 可視化":
 
     # ===== ベース：シンプルな折れ線グラフ =====
     base = alt.Chart(df_plot).mark_line().encode(
-        x=alt.X("date:T", title="日付"),
+        x=alt.X("date:T", axis=x_axis_main, scale=x_scale),
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
             alt.Tooltip("plot_val:Q", title="値(0-1)", format=".4f"),
         ],
     ).properties(
-        height=400,
+        height=320,          # ちょっとだけ小さく
+        width="container",
+    )
+
+    # === STEP2: 月ラベル strip ===
+    strip_month = alt.Chart(df_plot).mark_point(opacity=0).encode(
+        x=alt.X(
+            "date:T",
+            axis=alt.Axis(
+                title="",
+                format="%m/%d",
+                labelAngle=0,
+                labelOverlap=True,
+            ),
+        )
+    ).properties(
+        height=30,
+        width="container",
+    )
+    
+    # === STEP2: 年ラベル strip ===
+    strip_year = alt.Chart(df_plot).mark_point(opacity=0).encode(
+        x=alt.X(
+            "date:T",
+            axis=alt.Axis(
+                title="",
+                format="%Y",
+                labelAngle=0,
+                labelOverlap=True,
+            ),
+        )
+    ).properties(
+        height=20,
         width="container",
     )
 
@@ -652,9 +695,15 @@ if mode == "📊 可視化":
             y=alt.Y("value:Q", title=""),
             color=alt.Color("setting:N", title="設定"),
         )
-        chart = base + rules
+        main_chart = base + rules
     else:
-        chart = base
-
+        main_chart = base
+    
+    # メイン + 月 + 年 を縦に並べる
+    final = alt.vconcat(main_chart, strip_month, strip_year).resolve_scale(
+        x="shared"
+    )
+    
     st.subheader(title)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(final, use_container_width=True)
+
