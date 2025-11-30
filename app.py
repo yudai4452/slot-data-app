@@ -570,6 +570,7 @@ if mode == "📊 可視化":
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
         return df  # date は SQL から datetime64[ns] で来る
+
     @st.cache_data(ttl=300)
     def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
@@ -595,110 +596,65 @@ if mode == "📊 可視化":
         df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
         title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
 
-
     if df_plot is None or df_plot.empty:
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
         st.stop()
 
-    # ---- デバッグ用：df_plot の中身を確認できるようにしておく ----
-    with st.expander("デバッグ: df_plot の中身（うまく描画されないときだけ開いてOK）", expanded=False):
-        st.write("行数:", len(df_plot))
-        st.write(df_plot.head())
-        st.write(df_plot.dtypes)
-
-    # ===== date を datetime に揃えてソート =====
-    df_plot = df_plot.copy()
+    # ===== X軸を実データ範囲に固定（空白除去） =====
     df_plot["date"] = pd.to_datetime(df_plot["date"])
-    df_plot = df_plot.sort_values("date")
-
-    # ===== 設定ライン用データ（setting.json から） =====
-    thresholds = setting_map.get(machine_sel, {})
-
-    # === STEP1: Y軸を 1/x 表記にする ===
-    y_axis = alt.Axis(
-    title="合成確率 (1/x 表記)",
-    # 0 より大きい値だけ 1/x 表記、その他は空文字
-    labelExpr=(
-        "isValid(datum.value) && datum.value > 0 "
-        "? '1/' + round(1/datum.value) "
-        ": ''"
-        ),
-    )
-
     xdomain_start = df_plot["date"].min()
     xdomain_end   = df_plot["date"].max()
+    if pd.isna(xdomain_start) or pd.isna(xdomain_end):
+        st.info("表示対象の期間に日付がありません。")
+        st.stop()
+    if xdomain_start == xdomain_end:
+        xdomain_end = xdomain_end + pd.Timedelta(days=1)
 
-    x_axis_main = alt.Axis(
+    # 7) 設定ライン
+    thresholds = setting_map.get(machine_sel, {})
+    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
+               if thresholds else pd.DataFrame(columns=["setting","value"])
+
+    legend_sel = alt.selection_point(fields=["setting"], bind="legend")
+
+    # Y軸（1/x表記）
+    y_axis = alt.Axis(
+        title="合成確率",
+        format=".4f",
+        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
+    )
+
+    # ===== ベースチャート：日付ラベルは月初のみ M/D、他は D。自動間引き。=====
+    x_axis_days = alt.Axis(
         title="日付",
-        format="%Y-%m-%d",
+        labelExpr="date(datum.value)==1 ? timeFormat(datum.value,'%-m/%-d') : timeFormat(datum.value,'%-d')",
         labelAngle=0,
+        labelPadding=6,
+        labelOverlap=True,
+        labelBound=True,
     )
     x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
+    x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
 
-    
-    if thresholds:
-        df_rules = pd.DataFrame(
-            [{"setting": k, "value": float(v)} for k, v in thresholds.items()]
-        )
-    else:
-        df_rules = pd.DataFrame(columns=["setting", "value"])
-
-    # ===== ベース：シンプルな折れ線グラフ =====
     base = alt.Chart(df_plot).mark_line().encode(
-        x=alt.X("date:T", axis=x_axis_main, scale=x_scale),
+        x=x_field,
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("plot_val:Q", title="値(0-1)", format=".4f"),
+            alt.Tooltip("plot_val:Q", title="値", format=".4f")
         ],
-    ).properties(
-        height=320,          # ちょっとだけ小さく
-        width="container",
-    )
+    ).properties(height=400, width='container')
 
-    # === STEP2: 月ラベル strip ===
-    strip_month = alt.Chart(df_plot).mark_point(opacity=0).encode(
-        x=alt.X(
-            "date:T",
-            axis=alt.Axis(
-                title="",
-                format="%m/%d",
-                labelAngle=0,
-                labelOverlap=True,
-            ),
-        )
-    ).properties(
-        height=30,
-        width="container",
-    )
-    
-    # === STEP2: 年ラベル strip ===
-    strip_year = alt.Chart(df_plot).mark_point(opacity=0).encode(
-        x=alt.X(
-            "date:T",
-            axis=alt.Axis(
-                title="",
-                format="%Y",
-                labelAngle=0,
-                labelOverlap=True,
-            ),
-        )
-    ).properties(
-        height=20,
-        width="container",
-    )
-
-
-    # ===== 設定ライン（あれば） =====
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y=alt.Y("value:Q", title=""),
-            color=alt.Color("setting:N", title="設定"),
-            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.2)),
-        ).add_params(legend_sel)
-    
-        main_chart = base + rules
+            y="value:Q",
+            color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
+            opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
+        )
+        main_chart = (base + rules).add_params(legend_sel).properties(width='container')
     else:
-        main_chart = base
+        main_chart = base.properties(width='container')
 
-
+    # ===== ここでそのまま表示（下の月・年ラベルチャートは削除）=====
+    st.subheader(title)
+    st.altair_chart(main_chart, use_container_width=True)
