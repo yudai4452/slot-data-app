@@ -81,6 +81,9 @@ COLUMN_MAP = {
     },
 }
 
+# 1/x 表記したい「確率系」カラム
+PROB_PLOT_COLUMNS = ["合成確率", "BB確率", "RB確率", "ART確率"]
+
 # ======================== Drive: 再帰 + ページング ========================
 @st.cache_data
 def list_csv_recursive(folder_id: str):
@@ -600,6 +603,44 @@ if mode == "📊 可視化":
     machine_sel = st.selectbox("機種選択", machines, key="machine_select")
     show_avg = st.checkbox("全台平均を表示", value=True, key="show_avg")
 
+    # ===== プロット対象カラム選択（テーブルの実カラムから自動検出）=====
+    insp = inspect(eng)
+    cols_info = insp.get_columns(table_name)
+
+    numeric_candidates = []
+    for c in cols_info:
+        name = c["name"]
+        # 軸としては除外したいカラム
+        if name in {"date", "機種", "台番号"}:
+            continue
+
+        # 型情報から「数値っぽい」カラムだけ拾う
+        col_type = str(c["type"]).upper()
+        if any(t in col_type for t in ("INT", "NUMERIC", "REAL", "DOUBLE", "FLOAT")):
+            numeric_candidates.append(name)
+
+    if not numeric_candidates:
+        st.error("プロット可能な数値カラムが見つかりません。")
+        st.stop()
+
+    # 確率系を上に、それ以外を下に並べる
+    numeric_candidates = sorted(
+        numeric_candidates,
+        key=lambda n: (0 if n in PROB_PLOT_COLUMNS else 1, n)
+    )
+
+    # デフォルトは 合成確率 があればそれ、なければ先頭
+    default_metric = "合成確率" if "合成確率" in numeric_candidates else numeric_candidates[0]
+
+    metric_col = st.selectbox(
+        "表示する項目",
+        numeric_candidates,
+        index=numeric_candidates.index(default_metric),
+        key="metric_select",
+    )
+
+    is_prob_metric = metric_col in PROB_PLOT_COLUMNS
+
     # 5) 台番号一覧（キャッシュ）
     @st.cache_data(ttl=600)
     def get_slots_fast(table_name: str, machine: str, start: dt.date, end: dt.date):
@@ -618,10 +659,12 @@ if mode == "📊 可視化":
 
     # 6) プロット用データ取得（キャッシュ & 必要列だけ）
     @st.cache_data(ttl=300)
-    def fetch_plot_avg(table_name: str, machine: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    def fetch_plot_avg(table_name: str, machine: str, metric: str,
+                       start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        COL_Q = '"' + metric.replace('"', '""') + '"'
         sql = sa.text(f'''
-            SELECT date, AVG("合成確率") AS plot_val
+            SELECT date, AVG({COL_Q}) AS plot_val
             FROM {TBL_Q}
             WHERE "機種" = :m
               AND date BETWEEN :s AND :e
@@ -633,10 +676,12 @@ if mode == "📊 可視化":
         return df
 
     @st.cache_data(ttl=300)
-    def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
+    def fetch_plot_slot(table_name: str, machine: str, metric: str, slot: int,
+                        start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
+        COL_Q = '"' + metric.replace('"', '""') + '"'
         sql = sa.text(f'''
-            SELECT date, "合成確率" AS plot_val
+            SELECT date, {COL_Q} AS plot_val
             FROM {TBL_Q}
             WHERE "機種" = :m
               AND "台番号" = :n
@@ -649,16 +694,16 @@ if mode == "📊 可視化":
 
     # ==== プロット対象選択 ====
     if show_avg:
-        df_plot = fetch_plot_avg(table_name, machine_sel, vis_start, vis_end)
-        title = f"📈 全台平均 合成確率 | {machine_sel}"
+        df_plot = fetch_plot_avg(table_name, machine_sel, metric_col, vis_start, vis_end)
+        title = f"📈 全台平均 {metric_col} | {machine_sel}"
     else:
         slots = get_slots_fast(table_name, machine_sel, vis_start, vis_end)
         if not slots:
             st.warning("台番号のデータが見つかりません")
             st.stop()
         slot_sel = st.selectbox("台番号", slots, key="slot_select")
-        df_plot = fetch_plot_slot(table_name, machine_sel, slot_sel, vis_start, vis_end)
-        title = f"📈 合成確率 | {machine_sel} | 台 {slot_sel}"
+        df_plot = fetch_plot_slot(table_name, machine_sel, metric_col, slot_sel, vis_start, vis_end)
+        title = f"📈 {metric_col} | {machine_sel} | 台 {slot_sel}"
 
     if df_plot is None or df_plot.empty:
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
@@ -674,7 +719,9 @@ if mode == "📊 可視化":
     if xdomain_start == xdomain_end:
         xdomain_end = xdomain_end + pd.Timedelta(days=1)
 
-    # ===== 表示用 1/x ラベル列を追加（ツールチップ用）=====
+    # ===== 1/x ラベル or 普通の数値ラベル =====
+    df_plot = df_plot.copy()
+
     def prob_to_label(v):
         if v is None or pd.isna(v) or v <= 0:
             return "0"
@@ -683,31 +730,44 @@ if mode == "📊 可視化":
         except Exception:
             return "0"
 
-    df_plot = df_plot.copy()
-    df_plot["inv_label"] = df_plot["plot_val"].apply(prob_to_label)
-
-    # ===== 設定ライン（setting.json）も「確率(0〜1)」としてそのまま使う =====
-    thresholds = setting_map.get(machine_sel, {})
-    if thresholds:
-        df_rules = pd.DataFrame(
-            [{"setting": k, "value": float(v)} for k, v in thresholds.items()]
+    if is_prob_metric:
+        df_plot["inv_label"] = df_plot["plot_val"].apply(prob_to_label)
+    else:
+        df_plot["inv_label"] = df_plot["plot_val"].apply(
+            lambda v: "" if v is None or pd.isna(v) else f"{v:,.0f}"
         )
+
+    # ===== 設定ライン（確率系のときだけ setting.json を使う）=====
+    if is_prob_metric:
+        thresholds = setting_map.get(machine_sel, {})
+        if thresholds:
+            df_rules = pd.DataFrame(
+                [{"setting": k, "value": float(v)} for k, v in thresholds.items()]
+            )
+        else:
+            df_rules = pd.DataFrame(columns=["setting", "value"])
     else:
         df_rules = pd.DataFrame(columns=["setting", "value"])
 
     # 凡例クリック用 selection_point
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # ===== 軸定義（Y軸は 0〜1 を使いつつラベルだけ 1/x 表記）=====
-    y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",  # 内部値は 0.0101 とか
-        labelExpr=(
-            "isValid(datum.value) && isFinite(datum.value) "
-            "? (datum.value <= 0 ? '0' : '1/' + format(1/datum.value, '.0f')) "
-            ": ''"
-        ),
-    )
+    # ===== 軸定義 =====
+    if is_prob_metric:
+        y_axis = alt.Axis(
+            title=metric_col,
+            format=".4f",  # 内部値は 0.0101 とか
+            labelExpr=(
+                "isValid(datum.value) && isFinite(datum.value) "
+                "? (datum.value <= 0 ? '0' : '1/' + format(1/datum.value, '.0f')) "
+                ": ''"
+            ),
+        )
+    else:
+        y_axis = alt.Axis(
+            title=metric_col,
+            format=",.0f",
+        )
 
     x_axis_days = alt.Axis(
         title="日付",
@@ -719,16 +779,20 @@ if mode == "📊 可視化":
     x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
 
     # ===== ベースチャート（ライン＋ポイント）=====
+    tooltip_fields = [
+        alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
+    ]
+    if is_prob_metric:
+        tooltip_fields.append(alt.Tooltip("inv_label:N", title="見かけの確率"))
+        tooltip_fields.append(alt.Tooltip("plot_val:Q", title="確率(0〜1)", format=".4f"))
+    else:
+        tooltip_fields.append(alt.Tooltip("plot_val:Q", title=metric_col, format=",.0f"))
+
     base = alt.Chart(df_plot).mark_line(point=True).encode(
         x=x_field,
         y=alt.Y("plot_val:Q", axis=y_axis),
-        tooltip=[
-            alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("inv_label:N", title="見かけの確率"),
-            alt.Tooltip("plot_val:Q", title="確率(0〜1)", format=".4f"),
-        ],
+        tooltip=tooltip_fields,
     ).properties(height=400, width="container")
-
 
     # ===== 設定ライン（凡例クリック可）=====
     if not df_rules.empty:
@@ -741,6 +805,7 @@ if mode == "📊 可視化":
     else:
         final_chart = base
 
-    # ===== そのまま表示（下に月・年ラベルチャートはナシ）=====
+    # ===== 表示 =====
     st.subheader(title)
     st.altair_chart(final_chart, use_container_width=True)
+
