@@ -674,38 +674,39 @@ if mode == "📊 可視化":
     if xdomain_start == xdomain_end:
         xdomain_end = xdomain_end + pd.Timedelta(days=1)
 
-    # ===== Y値を 0〜1 から 1/x に変換 =====
-    df_plot = df_plot.copy()
-
-    def prob_to_inv(v):
-        if v is None or pd.isna(v) or v == 0:
-            return None
+    # ===== 表示用 1/x ラベル列を追加（ツールチップ用）=====
+    def prob_to_label(v):
+        if v is None or pd.isna(v) or v <= 0:
+            return "0"
         try:
-            return 1.0 / float(v)
+            return "1/" + str(int(round(1.0 / float(v))))
         except Exception:
-            return None
+            return "0"
 
-    df_plot["inv_val"] = df_plot["plot_val"].apply(prob_to_inv)
+    df_plot = df_plot.copy()
+    df_plot["inv_label"] = df_plot["plot_val"].apply(prob_to_label)
 
-    # ===== 設定ライン（setting.json）も 1/x に変換 =====
+    # ===== 設定ライン（setting.json）も「確率(0〜1)」としてそのまま使う =====
     thresholds = setting_map.get(machine_sel, {})
     if thresholds:
-        rows = []
-        for k, v in thresholds.items():
-            inv_v = prob_to_inv(v)
-            if inv_v is not None:
-                rows.append({"setting": k, "inv_val": inv_v})
-        df_rules = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["setting", "inv_val"])
+        df_rules = pd.DataFrame(
+            [{"setting": k, "value": float(v)} for k, v in thresholds.items()]
+        )
     else:
-        df_rules = pd.DataFrame(columns=["setting", "inv_val"])
+        df_rules = pd.DataFrame(columns=["setting", "value"])
 
     # 凡例クリック用 selection_point
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # ===== 軸定義 =====
+    # ===== 軸定義（Y軸は 0〜1 を使いつつラベルだけ 1/x 表記）=====
     y_axis = alt.Axis(
-        title="合成確率 (1/x)",
-        format="d",   # 100, 200, 300 みたいな整数表示
+        title="合成確率",
+        format=".4f",  # 内部値は 0.0101 とか
+        labelExpr=(
+            "isValid(datum.value) && isFinite(datum.value) "
+            "? (datum.value <= 0 ? '0' : '1/' + format(1/datum.value, '.0f')) "
+            ": ''"
+        ),
     )
 
     x_axis_days = alt.Axis(
@@ -720,10 +721,10 @@ if mode == "📊 可視化":
     # ===== ベースチャート（ライン）=====
     base = alt.Chart(df_plot).mark_line().encode(
         x=x_field,
-        y=alt.Y("inv_val:Q", axis=y_axis),
+        y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("inv_val:Q", title="1/x", format="d"),
+            alt.Tooltip("inv_label:N", title="見かけの確率"),
             alt.Tooltip("plot_val:Q", title="確率(0〜1)", format=".4f"),
         ],
     ).properties(height=400, width="container")
@@ -731,7 +732,7 @@ if mode == "📊 可視化":
     # ===== 設定ライン（凡例クリック可）=====
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y="inv_val:Q",
+            y="value:Q",
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
         )
