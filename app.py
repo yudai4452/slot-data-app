@@ -718,8 +718,8 @@ if mode == "📊 可視化":
     x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
     x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
 
-    # ===== ベースチャート（ライン）=====
-    base = alt.Chart(df_plot).mark_line().encode(
+    # ===== ベースチャート（ライン＋ポイント）=====
+    base = alt.Chart(df_plot).mark_line(point=True).encode(
         x=x_field,
         y=alt.Y("plot_val:Q", axis=y_axis),
         tooltip=[
@@ -728,6 +728,7 @@ if mode == "📊 可視化":
             alt.Tooltip("plot_val:Q", title="確率(0〜1)", format=".4f"),
         ],
     ).properties(height=400, width="container")
+
 
     # ===== 設定ライン（凡例クリック可）=====
     if not df_rules.empty:
