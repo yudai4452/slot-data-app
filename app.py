@@ -84,6 +84,14 @@ COLUMN_MAP = {
 # 1/x 表記したい「確率系」カラム
 PROB_PLOT_COLUMNS = ["合成確率", "BB確率", "RB確率", "ART確率"]
 
+# デフォルトで選びたい「出玉系」カラム（上から順に優先）
+DEFAULT_PAYOUT_COLUMNS = [
+    "最大差玉",
+    "差枚",
+    "差玉",
+    "最大持玉",
+]
+
 # ======================== Drive: 再帰 + ページング ========================
 @st.cache_data
 def list_csv_recursive(folder_id: str):
@@ -629,8 +637,14 @@ if mode == "📊 可視化":
         key=lambda n: (0 if n in PROB_PLOT_COLUMNS else 1, n)
     )
 
-    # デフォルトは 合成確率 があればそれ、なければ先頭
-    default_metric = "合成確率" if "合成確率" in numeric_candidates else numeric_candidates[0]
+    # デフォルトは「出玉系カラム」があればそれ、なければ合成確率、それもなければ先頭
+    payout_candidates = [c for c in DEFAULT_PAYOUT_COLUMNS if c in numeric_candidates]
+    if payout_candidates:
+        default_metric = payout_candidates[0]
+    elif "合成確率" in numeric_candidates:
+        default_metric = "合成確率"
+    else:
+        default_metric = numeric_candidates[0]
 
     metric_col = st.selectbox(
         "表示する項目",
@@ -640,6 +654,7 @@ if mode == "📊 可視化":
     )
 
     is_prob_metric = metric_col in PROB_PLOT_COLUMNS
+
 
     # 5) 台番号一覧（キャッシュ）
     @st.cache_data(ttl=600)
