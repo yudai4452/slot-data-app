@@ -601,7 +601,7 @@ if mode == "📊 可視化":
         st.stop()
 
     machine_sel = st.selectbox("機種選択", machines, key="machine_select")
-    show_avg = st.checkbox("全台平均を表示", value=True, key="show_avg")
+    show_avg = st.checkbox("全台平均を表示", value=False, key="show_avg")
 
     # ===== プロット対象カラム選択（テーブルの実カラムから自動検出）=====
     insp = inspect(eng)
