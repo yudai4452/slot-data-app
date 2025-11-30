@@ -694,16 +694,11 @@ if mode == "📊 可視化":
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
             y=alt.Y("value:Q", title=""),
             color=alt.Color("setting:N", title="設定"),
-        )
+            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.2)),
+        ).add_params(legend_sel)
+    
         main_chart = base + rules
     else:
         main_chart = base
-    
-    # メイン + 月 + 年 を縦に並べる
-    final = alt.vconcat(main_chart, strip_month, strip_year).resolve_scale(
-        x="shared"
-    )
-    
-    st.subheader(title)
-    st.altair_chart(final, use_container_width=True)
+
 
