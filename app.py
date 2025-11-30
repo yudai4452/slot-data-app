@@ -415,16 +415,38 @@ if mode == "📥 データ取り込み":
     imp_end   = c2.date_input("終了日", dt.date.today(), key="import_end_date")
 
     c3, c4 = st.columns(2)
-    max_files = c3.slider("最大ファイル数（1回の実行上限）", 10, 2000, 300, step=10,
-                          help="大量フォルダは分割して取り込み（タイムアウト回避）", key="max_files")
-    workers = c4.slider("並列ダウンロード数", 1, 8, 4,
-                        help="並列数が多すぎるとAPI制限に当たる可能性があります", key="workers")
+    max_files = c3.slider(
+        "最大ファイル数（1回の実行上限）",
+        10, 2000, 300, step=10,
+        help="大量フォルダは分割して取り込み（タイムアウト回避）",
+        key="max_files",
+    )
+    workers = c4.slider(
+        "並列ダウンロード数",
+        1, 8, 4,
+        help="並列数が多すぎるとAPI制限に当たる可能性があります",
+        key="workers",
+    )
 
-    use_copy = st.checkbox("DB書き込みをCOPYで高速化（推奨）", value=True,
-                           help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。", key="use_copy")
-    auto_batch = st.checkbox("最大ファイル数ごとに自動で続きのバッチも実行する", value=False, key="auto_batch")
-    max_batches = st.number_input("最大バッチ回数", min_value=1, max_value=100, value=3,
-                                  help="実行時間が長くなりすぎるのを防ぐための上限", key="max_batches")
+    use_copy = st.checkbox(
+        "DB書き込みをCOPYで高速化（推奨）",
+        value=True,
+        help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。",
+        key="use_copy",
+    )
+    auto_batch = st.checkbox(
+        "最大ファイル数ごとに自動で続きのバッチも実行する",
+        value=False,
+        key="auto_batch",
+    )
+    max_batches = st.number_input(
+        "最大バッチ回数",
+        min_value=1,
+        max_value=100,
+        value=3,
+        help="実行時間が長くなりすぎるのを防ぐための上限",
+        key="max_batches",
+    )
 
     if st.button("🚀 インポート実行", disabled=not folder_id, key="import_run"):
         try:
@@ -435,7 +457,10 @@ if mode == "📥 データ取り込み":
             st.stop()
 
         imported_md5 = get_imported_md5_map()
-        all_targets = [f for f in files if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")]
+        all_targets = [
+            f for f in files
+            if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")
+        ]
         if not all_targets:
             st.success("差分はありません（すべて最新）")
             st.stop()
@@ -482,9 +507,11 @@ if mode == "📊 可視化":
     # 1) テーブル一覧
     try:
         with eng.connect() as conn:
-            tables = [r[0] for r in conn.execute(sa.text(
-                "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
-            ))]
+            tables = [
+                r[0] for r in conn.execute(sa.text(
+                    "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
+                ))
+            ]
     except Exception as e:
         st.error(f"テーブル一覧取得エラー: {e}")
         st.stop()
@@ -518,16 +545,38 @@ if mode == "📊 可視化":
         st.stop()
 
     c1, c2 = st.columns(2)
-    vis_start = c1.date_input("開始日", value=min_date, min_value=min_date, max_value=max_date, key=f"visual_start_{table_name}")
-    vis_end   = c2.date_input("終了日", value=max_date, min_value=min_date, max_value=max_date, key=f"visual_end_{table_name}")
+    vis_start = c1.date_input(
+        "開始日",
+        value=min_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"visual_start_{table_name}",
+    )
+    vis_end   = c2.date_input(
+        "終了日",
+        value=max_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"visual_end_{table_name}",
+    )
 
     # 3) インデックス（任意）
-    idx_ok = st.checkbox("読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True, key="create_index")
+    idx_ok = st.checkbox(
+        "読み込み高速化のためのインデックスを作成（推奨・一度だけ）",
+        value=True,
+        key="create_index",
+    )
     if idx_ok:
         try:
             with eng.begin() as conn:
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date ON {TBL_Q} ("機種","date");'))
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date ON {TBL_Q} ("機種","台番号","date");'))
+                conn.execute(sa.text(
+                    f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date '
+                    f'ON {TBL_Q} ("機種","date");'
+                ))
+                conn.execute(sa.text(
+                    f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date '
+                    f'ON {TBL_Q} ("機種","台番号","date");'
+                ))
         except Exception as e:
             st.info(f"インデックス作成をスキップ: {e}")
 
@@ -535,7 +584,11 @@ if mode == "📊 可視化":
     @st.cache_data(ttl=600)
     def get_machines_fast(table_name: str, start: dt.date, end: dt.date):
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'SELECT DISTINCT "機種" FROM {TBL_Q} WHERE date BETWEEN :s AND :e ORDER BY "機種"')
+        sql = sa.text(
+            f'SELECT DISTINCT "機種" FROM {TBL_Q} '
+            f'WHERE date BETWEEN :s AND :e '
+            f'ORDER BY "機種"'
+        )
         with eng.connect() as conn:
             return [r[0] for r in conn.execute(sql, {"s": start, "e": end})]
 
@@ -551,7 +604,14 @@ if mode == "📊 可視化":
     @st.cache_data(ttl=600)
     def get_slots_fast(table_name: str, machine: str, start: dt.date, end: dt.date):
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
-        sql = sa.text(f'SELECT DISTINCT "台番号" FROM {TBL_Q} WHERE "機種"=:m AND date BETWEEN :s AND :e AND "台番号" IS NOT NULL ORDER BY "台番号"')
+        sql = sa.text('''
+            SELECT DISTINCT "台番号"
+            FROM {tbl}
+            WHERE "機種" = :m
+              AND date BETWEEN :s AND :e
+              AND "台番号" IS NOT NULL
+            ORDER BY "台番号"
+        '''.format(tbl=TBL_Q))
         with eng.connect() as conn:
             vals = [r[0] for r in conn.execute(sql, {"m": machine, "s": start, "e": end})]
         return [int(v) for v in vals if v is not None]
@@ -563,26 +623,31 @@ if mode == "📊 可視化":
         sql = sa.text(f'''
             SELECT date, AVG("合成確率") AS plot_val
             FROM {TBL_Q}
-            WHERE "機種" = :m AND date BETWEEN :s AND :e
+            WHERE "機種" = :m
+              AND date BETWEEN :s AND :e
             GROUP BY date
             ORDER BY date
         ''')
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
-        return df  # date は SQL から datetime64[ns] で来る
+        return df
+
     @st.cache_data(ttl=300)
     def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
         sql = sa.text(f'''
             SELECT date, "合成確率" AS plot_val
             FROM {TBL_Q}
-            WHERE "機種" = :m AND "台番号" = :n AND date BETWEEN :s AND :e
+            WHERE "機種" = :m
+              AND "台番号" = :n
+              AND date BETWEEN :s AND :e
             ORDER BY date
         ''')
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "n": int(slot), "s": start, "e": end})
         return df
 
+    # ==== プロット対象選択 ====
     if show_avg:
         df_plot = fetch_plot_avg(table_name, machine_sel, vis_start, vis_end)
         title = f"📈 全台平均 合成確率 | {machine_sel}"
@@ -599,7 +664,7 @@ if mode == "📊 可視化":
         st.info("この条件では表示データがありません。期間や機種を変更してください。")
         st.stop()
 
-    # ===== X軸を実データ範囲に固定（空白除去） =====
+    # ===== 日付整形 & X軸ドメイン =====
     df_plot["date"] = pd.to_datetime(df_plot["date"])
     xdomain_start = df_plot["date"].min()
     xdomain_end   = df_plot["date"].max()
@@ -609,84 +674,71 @@ if mode == "📊 可視化":
     if xdomain_start == xdomain_end:
         xdomain_end = xdomain_end + pd.Timedelta(days=1)
 
-    # 7) 設定ライン
-    thresholds = setting_map.get(machine_sel, {})
-    df_rules = pd.DataFrame([{"setting": k, "value": v} for k, v in thresholds.items()]) \
-               if thresholds else pd.DataFrame(columns=["setting","value"])
+    # ===== Y値を 0〜1 から 1/x に変換 =====
+    df_plot = df_plot.copy()
 
+    def prob_to_inv(v):
+        if v is None or pd.isna(v) or v == 0:
+            return None
+        try:
+            return 1.0 / float(v)
+        except Exception:
+            return None
+
+    df_plot["inv_val"] = df_plot["plot_val"].apply(prob_to_inv)
+
+    # ===== 設定ライン（setting.json）も 1/x に変換 =====
+    thresholds = setting_map.get(machine_sel, {})
+    if thresholds:
+        rows = []
+        for k, v in thresholds.items():
+            inv_v = prob_to_inv(v)
+            if inv_v is not None:
+                rows.append({"setting": k, "inv_val": inv_v})
+        df_rules = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["setting", "inv_val"])
+    else:
+        df_rules = pd.DataFrame(columns=["setting", "inv_val"])
+
+    # 凡例クリック用 selection_point
     legend_sel = alt.selection_point(fields=["setting"], bind="legend")
 
-    # Y軸（1/x表記）
+    # ===== 軸定義 =====
     y_axis = alt.Axis(
-        title="合成確率",
-        format=".4f",
-        labelExpr="isValid(datum.value) ? (datum.value==0 ? '0' : '1/'+format(round(1/datum.value),'d')) : ''"
+        title="合成確率 (1/x)",
+        format="d",   # 100, 200, 300 みたいな整数表示
     )
 
-    # ===== ベースチャート：日付ラベルは月初のみ M/D、他は D。自動間引き。=====
     x_axis_days = alt.Axis(
         title="日付",
-        labelExpr="date(datum.value)==1 ? timeFormat(datum.value,'%-m/%-d') : timeFormat(datum.value,'%-d')",
+        format="%m/%d",
         labelAngle=0,
-        labelPadding=6,
-        labelOverlap=True,
-        labelBound=True,
     )
+
     x_scale = alt.Scale(domain=[xdomain_start, xdomain_end])
     x_field = alt.X("date:T", axis=x_axis_days, scale=x_scale)
 
+    # ===== ベースチャート（ライン）=====
     base = alt.Chart(df_plot).mark_line().encode(
         x=x_field,
-        y=alt.Y("plot_val:Q", axis=y_axis),
+        y=alt.Y("inv_val:Q", axis=y_axis),
         tooltip=[
             alt.Tooltip("date:T", title="日付", format="%Y-%m-%d"),
-            alt.Tooltip("plot_val:Q", title="値", format=".4f")
+            alt.Tooltip("inv_val:Q", title="1/x", format="d"),
+            alt.Tooltip("plot_val:Q", title="確率(0〜1)", format=".4f"),
         ],
-    ).properties(height=400, width='container')
+    ).properties(height=400, width="container")
 
+    # ===== 設定ライン（凡例クリック可）=====
     if not df_rules.empty:
         rules = alt.Chart(df_rules).mark_rule(strokeDash=[4, 2]).encode(
-            y="value:Q",
+            y="inv_val:Q",
             color=alt.Color("setting:N", legend=alt.Legend(title="設定ライン")),
             opacity=alt.condition(legend_sel, alt.value(1), alt.value(0.15)),
         )
-        main_chart = (base + rules).add_params(legend_sel).properties(width='container')
+        final_chart = (base + rules).add_params(legend_sel)
     else:
-        main_chart = base.properties(width='container')
+        final_chart = base
 
-    # ===== ストリップ：月と年を各1回だけ（実データ範囲に合わせる）=====
-    def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
-        s = start.replace(day=1)
-        rng = pd.date_range(s, end, freq="MS")
-        return pd.DataFrame({"date": rng, "label": [f"{d.month}月" for d in rng]})
-
-    def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
-        y0 = start.replace(month=1, day=1)
-        rng = pd.date_range(y0, end, freq="YS")
-        return pd.DataFrame({"date": rng, "label": [f"{d.year}年" for d in rng]})
-
-    df_month = month_starts(xdomain_start.date(), xdomain_end.date())
-    df_year  = year_starts(xdomain_start.date(), xdomain_end.date())
-
-    month_text = alt.Chart(df_month).mark_text(baseline="top").encode(
-        x=alt.X("date:T", axis=None),
-        y=alt.value(22),
-        text="label:N"
-    ).properties(width='container')
-
-    year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
-        x=alt.X("date:T", axis=None),
-        y=alt.value(6),
-        text="label:N"
-    ).properties(width='container')
-
-    strip = (year_text + month_text).properties(height=28, width='container')
-
-    # ===== 連結（X共有）。余白を詰める =====
-    final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
-        padding={"left": 8, "right": 8, "top": 8, "bottom": 8},
-        bounds="flush",
-    )
-
+    # ===== そのまま表示（下に月・年ラベルチャートはナシ）=====
     st.subheader(title)
-    st.altair_chart(final, use_container_width=True)
+    st.altair_chart(final_chart, use_container_width=True)
