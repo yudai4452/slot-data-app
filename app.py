@@ -654,5 +654,39 @@ if mode == "📊 可視化":
     else:
         main_chart = base.properties(width='container')
 
+    # ===== ストリップ：月と年を各1回だけ（実データ範囲に合わせる）=====
+    def month_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
+        s = start.replace(day=1)
+        rng = pd.date_range(s, end, freq="MS")
+        return pd.DataFrame({"date": rng, "label": [f"{d.month}月" for d in rng]})
+
+    def year_starts(start: dt.date, end: dt.date) -> pd.DataFrame:
+        y0 = start.replace(month=1, day=1)
+        rng = pd.date_range(y0, end, freq="YS")
+        return pd.DataFrame({"date": rng, "label": [f"{d.year}年" for d in rng]})
+
+    df_month = month_starts(xdomain_start.date(), xdomain_end.date())
+    df_year  = year_starts(xdomain_start.date(), xdomain_end.date())
+
+    month_text = alt.Chart(df_month).mark_text(baseline="top").encode(
+        x=alt.X("date:T", axis=None),
+        y=alt.value(22),
+        text="label:N"
+    ).properties(width='container')
+
+    year_text = alt.Chart(df_year).mark_text(baseline="top").encode(
+        x=alt.X("date:T", axis=None),
+        y=alt.value(6),
+        text="label:N"
+    ).properties(width='container')
+
+    strip = (year_text + month_text).properties(height=28, width='container')
+
+    # ===== 連結（X共有）。余白を詰める =====
+    final = alt.vconcat(main_chart, strip).resolve_scale(x="shared").properties(
+        padding={"left": 8, "right": 8, "top": 8, "bottom": 8},
+        bounds="flush",
+    )
+
     st.subheader(title)
     st.altair_chart(final, use_container_width=True)
