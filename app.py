@@ -570,7 +570,6 @@ if mode == "📊 可視化":
         with eng.connect() as conn:
             df = pd.read_sql(sql, conn, params={"m": machine, "s": start, "e": end})
         return df  # date は SQL から datetime64[ns] で来る
-
     @st.cache_data(ttl=300)
     def fetch_plot_slot(table_name: str, machine: str, slot: int, start: dt.date, end: dt.date) -> pd.DataFrame:
         TBL_Q = '"' + table_name.replace('"', '""') + '"'
@@ -655,6 +654,5 @@ if mode == "📊 可視化":
     else:
         main_chart = base.properties(width='container')
 
-    # ===== ここでそのまま表示（下の月・年ラベルチャートは削除）=====
     st.subheader(title)
-    st.altair_chart(main_chart, use_container_width=True)
+    st.altair_chart(final, use_container_width=True)
