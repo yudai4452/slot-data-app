@@ -426,38 +426,16 @@ if mode == "📥 データ取り込み":
     imp_end   = c2.date_input("終了日", dt.date.today(), key="import_end_date")
 
     c3, c4 = st.columns(2)
-    max_files = c3.slider(
-        "最大ファイル数（1回の実行上限）",
-        10, 2000, 300, step=10,
-        help="大量フォルダは分割して取り込み（タイムアウト回避）",
-        key="max_files",
-    )
-    workers = c4.slider(
-        "並列ダウンロード数",
-        1, 8, 4,
-        help="並列数が多すぎるとAPI制限に当たる可能性があります",
-        key="workers",
-    )
+    max_files = c3.slider("最大ファイル数（1回の実行上限）", 10, 2000, 300, step=10,
+                          help="大量フォルダは分割して取り込み（タイムアウト回避）", key="max_files")
+    workers = c4.slider("並列ダウンロード数", 1, 8, 4,
+                        help="並列数が多すぎるとAPI制限に当たる可能性があります", key="workers")
 
-    use_copy = st.checkbox(
-        "DB書き込みをCOPYで高速化（推奨）",
-        value=True,
-        help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。",
-        key="use_copy",
-    )
-    auto_batch = st.checkbox(
-        "最大ファイル数ごとに自動で続きのバッチも実行する",
-        value=False,
-        key="auto_batch",
-    )
-    max_batches = st.number_input(
-        "最大バッチ回数",
-        min_value=1,
-        max_value=100,
-        value=3,
-        help="実行時間が長くなりすぎるのを防ぐための上限",
-        key="max_batches",
-    )
+    use_copy = st.checkbox("DB書き込みをCOPYで高速化（推奨）", value=True,
+                           help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。", key="use_copy")
+    auto_batch = st.checkbox("最大ファイル数ごとに自動で続きのバッチも実行する", value=False, key="auto_batch")
+    max_batches = st.number_input("最大バッチ回数", min_value=1, max_value=100, value=3,
+                                  help="実行時間が長くなりすぎるのを防ぐための上限", key="max_batches")
 
     if st.button("🚀 インポート実行", disabled=not folder_id, key="import_run"):
         try:
@@ -468,10 +446,7 @@ if mode == "📥 データ取り込み":
             st.stop()
 
         imported_md5 = get_imported_md5_map()
-        all_targets = [
-            f for f in files
-            if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")
-        ]
+        all_targets = [f for f in files if imported_md5.get(f["id"], "") != (f.get("md5Checksum") or "")]
         if not all_targets:
             st.success("差分はありません（すべて最新）")
             st.stop()
