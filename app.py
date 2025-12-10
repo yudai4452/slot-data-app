@@ -19,7 +19,11 @@ import json
 # Streamlit 基本設定
 # ============================================================
 st.set_page_config(page_title="Slot Manager", layout="wide")
-mode = st.sidebar.radio("モード", ("📥 データ取り込み", "📊 可視化"), key="mode_radio")
+mode = st.sidebar.radio(
+    "モード",
+    ("📥 データ取り込み", "📊 可視化", "🤖 ML用データ"),
+    key="mode_radio",
+)
 st.title("🎰 Slot Data Manager & Visualizer")
 
 # ============================================================
@@ -1030,44 +1034,6 @@ if mode == "📊 可視化":
             )
         return df
 
-    @st.cache_data(ttl=600)
-    def fetch_raw_for_ml(
-        table_name: str,
-        machine: str,
-        start: dt.date,
-        end: dt.date,
-        cols: tuple[str, ...],
-    ) -> pd.DataFrame:
-        """
-        ML用の元データ（日別×台）の取得。
-        date, 機種, 台番号 + 指定カラム群 を返す。
-        """
-        TBL_Q_inner = '"' + table_name.replace('"', '""') + '"'
-        # カラム名をクオート
-        col_list = []
-        for c in cols:
-            col_list.append('"' + c.replace('"', '""') + '"')
-        col_sql = ""
-        if col_list:
-            col_sql = ", " + ", ".join(col_list)
-
-        sql = sa.text(
-            f"""
-            SELECT date, "機種", "台番号"{col_sql}
-            FROM {TBL_Q_inner}
-            WHERE "機種" = :m
-              AND date BETWEEN :s AND :e
-            ORDER BY "台番号", date
-        """
-        )
-        with eng.connect() as conn:
-            df = pd.read_sql(
-                sql,
-                conn,
-                params={"m": machine, "s": start, "e": end},
-            )
-        return df
-
     # --------------------------------------------------------
     # 7) プロット対象データを準備（全台平均 or 台別）
     # --------------------------------------------------------
@@ -1080,7 +1046,6 @@ if mode == "📊 可視化":
             vis_end,
         )
         title = f"📈 全台平均 {metric_col} | {machine_sel}"
-        slot_sel = None  # ML用UIでの表示文字列向け
     else:
         slots = get_slots_fast(table_name, machine_sel, vis_start, vis_end)
         if not slots:
@@ -1231,154 +1196,210 @@ if mode == "📊 可視化":
         final_chart = base
 
     # --------------------------------------------------------
-    # 14) グラフ表示
+    # 14) 表示
     # --------------------------------------------------------
     st.subheader(title)
     st.altair_chart(final_chart, use_container_width=True)
 
+
+# ============================================================
+# 🤖 機械学習用データモード
+# ============================================================
+if mode == "🤖 ML用データ":
+    st.header("機械学習用データ作成")
+
     # --------------------------------------------------------
-    # 15) 機械学習用データ作成
+    # 1) 店舗テーブル一覧
     # --------------------------------------------------------
-    with st.expander("🤖 この機種の機械学習用データを作成"):
-        st.caption(
-            "指定した期間・機種の、日別×台番号データからラグ特徴量付きの学習用テーブルを作ります。"
+    try:
+        with eng.connect() as conn:
+            tables = [
+                r[0]
+                for r in conn.execute(
+                    sa.text(
+                        "SELECT tablename FROM pg_tables WHERE tablename LIKE 'slot_%'"
+                    )
+                )
+            ]
+    except Exception as e:
+        st.error(f"テーブル一覧取得エラー: {e}")
+        st.stop()
+
+    if not tables:
+        st.info("まず取り込みモードでデータを入れてください。")
+        st.stop()
+
+    # 可視化モードと同じく、デフォルトは slot_プレゴ立川 にしておく
+    default_table = "slot_プレゴ立川"
+    default_index = next(
+        (i for i, t in enumerate(tables) if t == default_table),
+        0,
+    )
+
+    table_name = st.selectbox(
+        "店舗テーブル（store）",
+        tables,
+        index=default_index,
+        key="ml_table_select",
+    )
+    if not table_name:
+        st.error("テーブルが選択されていません")
+        st.stop()
+
+    # テーブル名から店舗名を復元（slot_◯◯ → ◯◯）
+    store_name = table_name.replace("slot_", "", 1)
+    TBL_Q = '"' + table_name.replace('"', '""') + '"'
+
+    # --------------------------------------------------------
+    # 2) 日付範囲（その店舗に存在する date の最小・最大）
+    # --------------------------------------------------------
+    @st.cache_data(ttl=600)
+    def get_date_range_ml(table_name: str):
+        TBL_Q_inner = '"' + table_name.replace('"', '""') + '"'
+        with eng.connect() as conn:
+            row = conn.execute(
+                sa.text(f"SELECT MIN(date), MAX(date) FROM {TBL_Q_inner}")
+            ).first()
+        return (row[0], row[1]) if row else (None, None)
+
+    min_date, max_date = get_date_range_ml(table_name)
+    if not (min_date and max_date):
+        st.info("このテーブルには日付データがありません。まず取り込みを実行してください。")
+        st.stop()
+
+    c1, c2 = st.columns(2)
+    ml_start = c1.date_input(
+        "開始日",
+        value=min_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"ml_start_{table_name}",
+    )
+    ml_end = c2.date_input(
+        "終了日",
+        value=max_date,
+        min_value=min_date,
+        max_value=max_date,
+        key=f"ml_end_{table_name}",
+    )
+
+    if ml_start > ml_end:
+        st.error("開始日が終了日より後になっています。")
+        st.stop()
+
+    # --------------------------------------------------------
+    # 3) 機種一覧（期間内に出現するものだけ）
+    # --------------------------------------------------------
+    @st.cache_data(ttl=600)
+    def get_machines_ml(table_name: str, start: dt.date, end: dt.date):
+        TBL_Q_inner = '"' + table_name.replace('"', '""') + '"'
+        sql = sa.text(
+            f'''
+            SELECT DISTINCT "機種"
+            FROM {TBL_Q_inner}
+            WHERE date BETWEEN :s AND :e
+            ORDER BY "機種"
+            '''
+        )
+        with eng.connect() as conn:
+            return [r[0] for r in conn.execute(sql, {"s": start, "e": end})]
+
+    machines = get_machines_ml(table_name, ml_start, ml_end)
+    if not machines:
+        st.warning("指定期間にデータがある機種がありません。")
+        st.stop()
+
+    machine_sel = st.selectbox(
+        "機種を選択",
+        machines,
+        key="ml_machine_select",
+    )
+
+    st.caption(
+        "※ 選択した店舗・機種・期間について、全台分の時系列データをそのまま出力します。\n"
+        "　何日分を1サンプルにまとめるかなどは、別の前処理スクリプト側で行う想定です。"
+    )
+
+    # --------------------------------------------------------
+    # 4) ML用データ取得
+    # --------------------------------------------------------
+    @st.cache_data(ttl=300)
+    def fetch_ml_data(
+        table_name: str,
+        store_name: str,
+        machine: str,
+        start: dt.date,
+        end: dt.date,
+    ) -> pd.DataFrame:
+        """
+        指定店舗テーブルから、特定機種の全台・指定期間分のデータを取得。
+        - 店舗列「店舗」を追加
+        - 台番号 → 日付 の順でソート
+        """
+        TBL_Q_inner = '"' + table_name.replace('"', '""') + '"'
+
+        # どのカラムがあるかは店舗によって違うので、素直に SELECT * にしておく
+        sql = sa.text(
+            f'''
+            SELECT *
+            FROM {TBL_Q_inner}
+            WHERE "機種" = :m
+              AND date BETWEEN :s AND :e
+            ORDER BY "台番号", date
+            '''
+        )
+        with eng.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={"m": machine, "s": start, "e": end},
+            )
+
+        if df.empty:
+            return df
+
+        # 店舗名カラムを追加
+        df.insert(0, "店舗", store_name)
+
+        return df
+
+    if st.button("📦 データ取得・プレビュー", key="ml_fetch"):
+        df_ml = fetch_ml_data(
+            table_name=table_name,
+            store_name=store_name,
+            machine=machine_sel,
+            start=ml_start,
+            end=ml_end,
         )
 
-        if show_avg:
-            st.info("ML用データは台別データで作成します。「全台平均を表示」のチェックを外してください。")
-        else:
-            # どの台を使うか
-            scope_opts = [
-                "この機種の全台を使う",
-                f"この台だけ使う（台 {slot_sel}）",
-            ]
-            scope = st.radio("台の範囲", scope_opts, index=0, key="ml_scope")
+        if df_ml.empty:
+            st.warning("この条件ではデータがありません。期間や機種を変更してください。")
+            st.stop()
 
-            # 特徴量にするカラム
-            default_feats = []
-            if metric_col in numeric_candidates:
-                default_feats = [metric_col]
-            st.write("**特徴量に使うカラム（複数選択可）**")
-            feat_cols = st.multiselect(
-                "",
-                numeric_candidates,
-                default=default_feats,
-                key="ml_feat_cols",
-            )
-            if not feat_cols:
-                st.warning("少なくとも1つは特徴量カラムを選択してください。")
-            else:
-                # ラグ日数
-                lag_days = st.slider(
-                    "入力に使う過去日数（ラグ数）",
-                    min_value=1,
-                    max_value=30,
-                    value=7,
-                    help="ラグ0=当日, ラグ1=1日前 ... のように特徴量を作成します。",
-                    key="ml_lag_days",
-                )
+        st.success(f"データ取得完了: {len(df_ml):,} 行 × {len(df_ml.columns)} 列")
 
-                # 教師ラベル
-                label_options = ["（作らない）"] + numeric_candidates
-                if metric_col in numeric_candidates:
-                    default_label_idx = label_options.index(metric_col)
-                else:
-                    default_label_idx = 0
+        # 上位だけ表示（全部出すと重い可能性があるので head）
+        st.write("▼ 先頭100行だけプレビュー")
+        st.dataframe(df_ml.head(100))
 
-                label_col = st.selectbox(
-                    "教師ラベルにするカラム（任意）",
-                    label_options,
-                    index=default_label_idx,
-                    key="ml_label_col",
-                )
+        # ダウンロード用 CSV
+        csv_bytes = df_ml.to_csv(index=False).encode("utf-8-sig")
+        fname = (
+            f"mldata_{store_name}_{machine_sel}"
+            f"_{ml_start.strftime('%Y%m%d')}_{ml_end.strftime('%Y%m%d')}.csv"
+        )
 
-                make_label = label_col != "（作らない）"
-                if make_label:
-                    horizon = st.slider(
-                        "何日先をラベルにするか（1=翌日）",
-                        min_value=1,
-                        max_value=30,
-                        value=1,
-                        key="ml_horizon",
-                    )
-                else:
-                    horizon = 1  # dummy
+        st.download_button(
+            "⬇️ CSVダウンロード（UTF-8 BOM付き）",
+            data=csv_bytes,
+            file_name=fname,
+            mime="text/csv",
+            key="ml_download",
+        )
 
-                if st.button("ML用データを作成＆下に表示", key="ml_build"):
-                    with st.spinner("ML用データを作成中..."):
-                        # 元データの取得
-                        base_cols = set(feat_cols)
-                        if make_label:
-                            base_cols.add(label_col)
-                        base_cols = tuple(sorted(base_cols))
-
-                        df_raw = fetch_raw_for_ml(
-                            table_name,
-                            machine_sel,
-                            vis_start,
-                            vis_end,
-                            base_cols,
-                        )
-                        if df_raw.empty:
-                            st.warning("指定条件の元データが空でした。期間や機種を見直してください。")
-                        else:
-                            # 台の範囲でフィルタ
-                            if scope == scope_opts[1]:
-                                df_raw = df_raw[df_raw["台番号"] == slot_sel]
-
-                            if df_raw.empty:
-                                st.warning("選択した台のデータがありません。")
-                            else:
-                                # ラグ特徴量を作成
-                                df_raw = df_raw.sort_values(["台番号", "date"]).copy()
-                                g = df_raw.groupby("台番号")
-
-                                created_cols: list[str] = []
-
-                                # ラグ特徴量の作成
-                                for col in feat_cols:
-                                    for lag in range(lag_days):
-                                        new_col = f"{col}_lag{lag}"
-                                        df_raw[new_col] = g[col].shift(lag)
-                                        created_cols.append(new_col)
-
-                                # ラベル列
-                                label_name = None
-                                if make_label:
-                                    label_name = f"target_{label_col}_t+{horizon}"
-                                    df_raw[label_name] = g[label_col].shift(-horizon)
-                                    created_cols_all = created_cols + [label_name]
-                                else:
-                                    created_cols_all = created_cols
-
-                                # NA を含む行は学習しづらいので除外
-                                out_cols = ["date", "機種", "台番号"] + created_cols_all
-                                df_ml = df_raw[out_cols].dropna().reset_index(drop=True)
-
-                                if df_ml.empty:
-                                    st.warning(
-                                        "指定したラグ数/ラベルでは有効な行が残りませんでした。期間を長くするか、ラグ数を小さくしてください。"
-                                    )
-                                else:
-                                    st.success(
-                                        f"ML用データを作成しました。行数={len(df_ml)}, 特徴量列数={len(created_cols)}"
-                                    )
-                                    st.write("先頭数行のサンプル：")
-                                    st.dataframe(df_ml.head(100))
-
-                                    # CSV ダウンロード
-                                    def sanitize(s: str) -> str:
-                                        return "".join(
-                                            ch if ch.isalnum() or ch in ("-", "_", ".") else "_"
-                                            for ch in s
-                                        )
-
-                                    fname = f"ml_{sanitize(table_name)}_{sanitize(machine_sel)}_lag{lag_days}.csv"
-                                    csv_bytes = df_ml.to_csv(index=False).encode("utf-8-sig")
-                                    st.download_button(
-                                        "CSVをダウンロード",
-                                        data=csv_bytes,
-                                        file_name=fname,
-                                        mime="text/csv",
-                                        key="ml_download_btn",
-                                    )
+        st.caption(
+            "この CSV を別の Python スクリプト等で読み込んで、\n"
+            "・スライディングウィンドウで特徴量を作る\n"
+            "・翌日の差枚を目的変数にする\n"
+            "など、好きな形で前処理してください。"
+        )
