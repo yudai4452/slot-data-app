@@ -1,11 +1,13 @@
 import io
 import re
+import json
 import datetime as dt
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
@@ -13,7 +15,6 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-import json
 
 # ============================================================
 # Streamlit 基本設定
@@ -22,7 +23,7 @@ st.set_page_config(page_title="Slot Manager", layout="wide")
 
 MODE_IMPORT = "📥 データ取り込み"
 MODE_VIZ = "📊 可視化"
-MODE_ML = "🧠 MLデータ作成"
+MODE_ML = "🧠 MLデータ作成（予測UI付き）"
 
 mode = st.sidebar.radio("モード", (MODE_IMPORT, MODE_VIZ, MODE_ML), key="mode_radio")
 st.title("🎰 Slot Data Manager & Visualizer")
@@ -80,11 +81,17 @@ if eng is None:
     st.stop()
 
 # ============================================================
-# 共通: Postgres 識別子のクオート用
+# 共通: Postgres 識別子クオート
 # ============================================================
 def q(name: str) -> str:
-    """Postgres 識別子のクオート用"""
     return '"' + name.replace('"', '""') + '"'
+
+
+def safe_index_name(table_name: str, suffix: str) -> str:
+    # 日本語テーブルでも index 名を ASCII 寄せして安全にする
+    base = re.sub(r"[^0-9a-zA-Z_]+", "_", table_name)
+    base = re.sub(r"_+", "_", base).strip("_") or "slot"
+    return f"{base}_{suffix}"
 
 
 # ============================================================
@@ -137,22 +144,12 @@ COLUMN_MAP = {
 PROB_PLOT_COLUMNS = ["合成確率", "BB確率", "RB確率", "ART確率"]
 
 # デフォルトで選択したい「出玉系」カラム（上から順に優先）
-DEFAULT_PAYOUT_COLUMNS = [
-    "最大差玉",
-    "差枚",
-    "差玉",
-    "最大持玉",
-]
+DEFAULT_PAYOUT_COLUMNS = ["最大差玉", "差枚", "差玉", "最大持玉"]
 
 # ============================================================
-# ML用: 差枚相当ターゲットの優先順位 & 表記ゆれ吸収
+# ML用: 差枚相当ターゲット（店ごとの違い吸収）
 # ============================================================
-PAYOUT_TARGET_PRIORITY = [
-    "差枚",
-    "差玉",
-    "最大差玉",
-    "最大持玉",
-]
+PAYOUT_TARGET_PRIORITY = ["差枚", "差玉", "最大差玉", "最大持玉"]
 PAYOUT_ALIASES = {
     "差枚": ["差枚", "差枚数", "差枚(枚)"],
     "差玉": ["差玉", "差玉数"],
@@ -162,20 +159,13 @@ PAYOUT_ALIASES = {
 
 
 def build_payout_candidates(numeric_candidates: list[str]) -> list[dict]:
-    """
-    numeric_candidates（そのテーブルに実在する数値カラム）から、
-    差枚相当ターゲット候補を優先順で返す。
-    戻り: [{"canonical":"差枚","source":"最大差玉","label":"差枚相当：最大差玉（最大差玉）"} ...]
-    """
     out = []
     seen_source = set()
     for canon in PAYOUT_TARGET_PRIORITY:
         for src in PAYOUT_ALIASES.get(canon, [canon]):
             if src in numeric_candidates and src not in seen_source:
                 seen_source.add(src)
-                out.append(
-                    {"canonical": canon, "source": src, "label": f"{canon}相当：{src}（{src}）"}
-                )
+                out.append({"canonical": canon, "source": src, "label": f"{canon}相当：{src}（{src}）"})
     return out
 
 
@@ -184,10 +174,6 @@ def build_payout_candidates(numeric_candidates: list[str]) -> list[dict]:
 # ============================================================
 @st.cache_data
 def list_csv_recursive(folder_id: str):
-    """
-    指定フォルダ配下の .csv をすべて取得（サブフォルダも含む）。
-    Drive API のページングを吸収してリストで返す。
-    """
     if drive is None:
         raise RuntimeError("Drive未接続です")
 
@@ -230,10 +216,6 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def parse_meta(path: str):
-    """
-    Google Drive 上のパス "データ/店舗/機種/slot_machine_data_YYYY-MM-DD.csv"
-    から (店舗, 機種, 日付) を抜き出す。
-    """
     parts = path.strip("/").split("/")
     if len(parts) < 3:
         raise ValueError(f"パスが短すぎます: {path}")
@@ -251,15 +233,9 @@ def parse_meta(path: str):
 # CSV → DataFrame 正規化
 # ============================================================
 def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
-    """
-    店舗ごとのカラム名揺れを COLUMN_MAP で吸収し、
-    ・確率系は 0〜1 の float
-    ・整数系は Int64
-    にそろえる。
-    """
     df = df_raw.rename(columns=COLUMN_MAP[store])
 
-    # ---- 確率系カラムを 0〜1 に統一 ----
+    # 確率系を 0〜1 に統一
     prob_cols = ["BB確率", "RB確率", "ART確率", "合成確率"]
     for col in prob_cols:
         if col not in df.columns:
@@ -268,17 +244,12 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
         ser = df[col].astype(str)
         mask_div = ser.str.contains("/", na=False)
 
-        # "1/113" のような表記
         if mask_div.any():
-            denom = pd.to_numeric(
-                ser[mask_div].str.split("/", expand=True)[1],
-                errors="coerce",
-            )
+            denom = pd.to_numeric(ser[mask_div].str.split("/", expand=True)[1], errors="coerce")
             val = 1.0 / denom
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
-        # 113 といった素の数字 → 1/113 に変換
         num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
@@ -287,7 +258,7 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # ---- 整数系カラム ----
+    # 整数系
     int_cols = [
         "台番号",
         "累計スタート",
@@ -307,10 +278,6 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
 
 
 def load_and_normalize(raw_bytes: bytes, store: str) -> pd.DataFrame:
-    """
-    生の CSV バイト列を読み込み、
-    店舗ごとの列マッピングを使って正規化した DataFrame を返す。
-    """
     header = pd.read_csv(io.BytesIO(raw_bytes), encoding="shift_jis", nrows=0).columns.tolist()
     mapping_keys = list(dict.fromkeys(COLUMN_MAP[store].keys()))
     usecols = [col for col in mapping_keys if col in header]
@@ -362,7 +329,6 @@ def get_imported_md5_map():
 def upsert_import_log(entries: list[dict]):
     if not entries:
         return
-
     log = ensure_import_log_table()
     stmt = pg_insert(log).values(entries)
     stmt = stmt.on_conflict_do_update(
@@ -436,7 +402,6 @@ def upsert_dataframe(conn, table: sa.Table, df: pd.DataFrame, pk=("date", "機�
     rows = df.to_dict(orient="records")
     if not rows:
         return
-
     stmt = pg_insert(table).values(rows)
     update_cols = {c.name: stmt.excluded[c.name] for c in table.c if c.name not in pk}
     stmt = stmt.on_conflict_do_update(index_elements=list(pk), set_=update_cols)
@@ -483,7 +448,6 @@ def bulk_upsert_copy_merge(table: sa.Table, df: pd.DataFrame, pk=("date", "機�
         driver_conn = getattr(conn.connection, "driver_connection", None)
         if driver_conn is None:
             driver_conn = conn.connection.connection  # psycopg2 fallback
-
         with driver_conn.cursor() as cur:
             cur.execute(create_tmp_sql)
             cur.copy_expert(copy_sql, io.StringIO(csv_text))
@@ -520,7 +484,6 @@ def process_one_file(file_meta: dict) -> dict | None:
             "md5": file_meta.get("md5Checksum") or "",
             "path": file_meta["path"],
         }
-
     except Exception as e:
         return {"error": f"{file_meta.get('path', '(unknown)')} 処理エラー: {e}"}
 
@@ -602,6 +565,121 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
 
 
 # ============================================================
+# 時系列基盤モデル（UI実行用）
+# ============================================================
+@st.cache_resource(show_spinner=False)
+def get_chronos2_pipeline(device_map: str = "cpu"):
+    from chronos import Chronos2Pipeline
+    return Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=device_map)
+
+
+@st.cache_resource(show_spinner=False)
+def get_timesfm_model():
+    import torch
+    import timesfm
+
+    torch.set_float32_matmul_precision("high")
+    model = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
+    try:
+        model.compile(
+            timesfm.ForecastConfig(
+                max_context=1024,
+                max_horizon=256,
+                normalize_inputs=True,
+            )
+        )
+    except Exception:
+        pass
+    return model
+
+
+def forecast_with_chronos2(df_long: pd.DataFrame, horizon: int, device_map: str = "cpu") -> pd.DataFrame:
+    pipe = get_chronos2_pipeline(device_map=device_map)
+
+    pred = pipe.predict_df(
+        df_long,
+        prediction_length=horizon,
+        quantile_levels=[0.1, 0.5, 0.9],
+        id_column="id",
+        timestamp_column="timestamp",
+        target="target",
+    )
+
+    if "0.5" in pred.columns:
+        pred = pred.rename(columns={"0.5": "yhat"})
+    elif "predictions" in pred.columns:
+        pred = pred.rename(columns={"predictions": "yhat"})
+    else:
+        num_cols = [c for c in pred.columns if c not in {"id", "timestamp"} and pd.api.types.is_numeric_dtype(pred[c])]
+        if not num_cols:
+            raise RuntimeError(f"Chronos-2の出力列が想定と違います: {pred.columns.tolist()}")
+        pred = pred.rename(columns={num_cols[0]: "yhat"})
+
+    keep = [c for c in ["id", "timestamp", "yhat", "0.1", "0.9"] if c in pred.columns]
+    return pred[keep].copy()
+
+
+def forecast_with_timesfm(df_long: pd.DataFrame, horizon: int, freq: str = "D") -> pd.DataFrame:
+    model = get_timesfm_model()
+
+    df_long = df_long.sort_values(["id", "timestamp"]).copy()
+    ids = df_long["id"].unique().tolist()
+
+    series_list = []
+    last_ts = {}
+
+    for _id in ids:
+        g = df_long[df_long["id"] == _id].sort_values("timestamp")
+        y = g["target"].astype(float)
+        y = y.interpolate(limit_direction="both").fillna(0.0)
+        series_list.append(y.to_numpy())
+        last_ts[_id] = pd.to_datetime(g["timestamp"].max())
+
+    point_fcst, _ = model.forecast(horizon=horizon, inputs=series_list)
+
+    rows = []
+    for i, _id in enumerate(ids):
+        start = last_ts[_id]
+        future_index = pd.date_range(start=start, periods=horizon + 1, freq=freq)[1:]
+        for t, ts in enumerate(future_index):
+            rows.append({"id": _id, "timestamp": ts, "yhat": float(point_fcst[i, t])})
+
+    return pd.DataFrame(rows)
+
+
+def prob_to_denom(p: float) -> float:
+    if p is None or (not np.isfinite(p)) or p <= 0:
+        return float("inf")
+    return 1.0 / float(p)
+
+
+def score_setting_by_denom(pred_prob: float, thresholds: dict) -> str | None:
+    if not thresholds:
+        return None
+
+    d = prob_to_denom(pred_prob)
+    best = None
+    best_dist = float("inf")
+
+    for k, v in thresholds.items():
+        try:
+            vv = float(v)
+        except Exception:
+            continue
+        dv = prob_to_denom(vv)
+        dist = abs(d - dv)
+        if dist < best_dist:
+            best_dist = dist
+            best = k
+
+    return best
+
+
+def safe_filename(s: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]+', "_", s)
+
+
+# ============================================================
 # 📥 データ取り込みモード
 # ============================================================
 if mode == MODE_IMPORT:
@@ -623,22 +701,37 @@ if mode == MODE_IMPORT:
 
     c3, c4 = st.columns(2)
     max_files = c3.slider(
-        "最大ファイル数（1回の実行上限）", 10, 2000, 300, step=10,
-        help="大量フォルダは分割して取り込み（タイムアウト回避）", key="max_files"
+        "最大ファイル数（1回の実行上限）",
+        10,
+        2000,
+        300,
+        step=10,
+        help="大量フォルダは分割して取り込み（タイムアウト回避）",
+        key="max_files",
     )
     workers = c4.slider(
-        "並列ダウンロード数", 1, 8, 4,
-        help="並列数が多すぎるとAPI制限に当たる可能性があります", key="workers"
+        "並列ダウンロード数",
+        1,
+        8,
+        4,
+        help="並列数が多すぎるとAPI制限に当たる可能性があります",
+        key="workers",
     )
 
     use_copy = st.checkbox(
-        "DB書き込みをCOPYで高速化（推奨）", value=True,
-        help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。", key="use_copy"
+        "DB書き込みをCOPYで高速化（推奨）",
+        value=True,
+        help="一時テーブルにCOPY→まとめてUPSERT。失敗時は自動で通常UPSERTにフォールバックします。",
+        key="use_copy",
     )
     auto_batch = st.checkbox("最大ファイル数ごとに自動で続きのバッチも実行する", value=False, key="auto_batch")
     max_batches = st.number_input(
-        "最大バッチ回数", min_value=1, max_value=100, value=3,
-        help="実行時間が長くなりすぎるのを防ぐための上限", key="max_batches"
+        "最大バッチ回数",
+        min_value=1,
+        max_value=100,
+        value=3,
+        help="実行時間が長くなりすぎるのを防ぐための上限",
+        key="max_batches",
     )
 
     if st.button("🚀 インポート実行", disabled=not folder_id, key="import_run"):
@@ -656,7 +749,7 @@ if mode == MODE_IMPORT:
             st.stop()
 
         all_targets.sort(key=lambda f: parse_meta(f["path"])[2])
-        batches = [all_targets[i: i + max_files] for i in range(0, len(all_targets), max_files)]
+        batches = [all_targets[i : i + max_files] for i in range(0, len(all_targets), max_files)]
         if not auto_batch:
             batches = batches[:1]
 
@@ -678,7 +771,7 @@ if mode == MODE_IMPORT:
         status.text("")
 
         if len(batches) > max_batches and auto_batch:
-            remaining = sum(len(b) for b in batches[int(max_batches):])
+            remaining = sum(len(b) for b in batches[int(max_batches) :])
             st.info(f"最大バッチ回数に達しました。残り {remaining} 件は、再度ボタンを押すと続きから処理します。")
 
         if all_errors:
@@ -737,9 +830,11 @@ if mode == MODE_VIZ:
     idx_ok = st.checkbox("読み込み高速化のためのインデックスを作成（推奨・一度だけ）", value=True, key="create_index")
     if idx_ok:
         try:
+            ix1 = safe_index_name(table_name, "ix_machine_date")
+            ix2 = safe_index_name(table_name, "ix_machine_slot_date")
             with eng.begin() as conn:
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_date ON {TBL_Q} ("機種","date");'))
-                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {table_name}_ix_machine_slot_date ON {TBL_Q} ("機種","台番号","date");'))
+                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {q(ix1)} ON {TBL_Q} ("機種","date");'))
+                conn.execute(sa.text(f'CREATE INDEX IF NOT EXISTS {q(ix2)} ON {TBL_Q} ("機種","台番号","date");'))
         except Exception as e:
             st.info(f"インデックス作成をスキップ: {e}")
 
@@ -849,7 +944,6 @@ if mode == MODE_VIZ:
         if not slots:
             st.warning("台番号のデータが見つかりません")
             st.stop()
-
         slot_sel = st.selectbox("台番号", slots, key="slot_select")
         df_plot = fetch_plot_slot(table_name, machine_sel, metric_col, slot_sel, vis_start, vis_end)
         title = f"📈 {metric_col} | {machine_sel} | 台 {slot_sel}"
@@ -860,14 +954,11 @@ if mode == MODE_VIZ:
 
     df_plot = df_plot.copy()
     df_plot["date"] = pd.to_datetime(df_plot["date"])
-
     xdomain_start = df_plot["date"].min()
     xdomain_end = df_plot["date"].max()
-
     if pd.isna(xdomain_start) or pd.isna(xdomain_end):
         st.info("表示対象の期間に日付がありません。")
         st.stop()
-
     if xdomain_start == xdomain_end:
         xdomain_end = xdomain_end + pd.Timedelta(days=1)
 
@@ -945,10 +1036,10 @@ if mode == MODE_VIZ:
 
 
 # ============================================================
-# 🧠 MLデータ作成モード（CSVダウンロード）
+# 🧠 MLデータ作成モード（予測UI付き）
 # ============================================================
 if mode == MODE_ML:
-    st.header("🧠 機械学習 / 時系列基盤モデル用データ作成（CSVダウンロード）")
+    st.header("🧠 機械学習 / 時系列基盤モデル用データ作成（＋ 予測UI）")
 
     # --- テーブル一覧 ---
     try:
@@ -1028,14 +1119,18 @@ if mode == MODE_ML:
     # --- 粒度 ---
     gran = st.radio("粒度", ["台別（台番号ごと）", "全台平均（dateで集約）"], horizontal=True, key="ml_gran")
 
-    # --- 予測タスク 2択 ---
+    # --- 予測タスク（2択） ---
     TASK_SETTING = "① 設定推定（合成確率→setting.json）"
     TASK_PAYOUT = "② 差枚系予測（差枚/差玉/最大差玉/最大持玉）"
 
     default_task = TASK_SETTING if (machine_sel in setting_map and setting_map.get(machine_sel)) else TASK_PAYOUT
-    task = st.radio("予測パターン", [TASK_SETTING, TASK_PAYOUT],
-                    index=[TASK_SETTING, TASK_PAYOUT].index(default_task),
-                    horizontal=True, key="ml_task")
+    task = st.radio(
+        "予測パターン",
+        [TASK_SETTING, TASK_PAYOUT],
+        index=[TASK_SETTING, TASK_PAYOUT].index(default_task),
+        horizontal=True,
+        key="ml_task",
+    )
 
     # --- target 決定 ---
     if task == TASK_SETTING:
@@ -1046,35 +1141,33 @@ if mode == MODE_ML:
         st.caption("合成確率(0〜1)を予測 → 予測値を setting.json の設定ラインに最も近い設定へ割り当てます。")
         if not setting_map.get(machine_sel, {}):
             st.warning("setting.json にこの機種の設定ラインがありません（設定推定のスコアリングができません）。")
-
+        target_kind = "prob"
     else:
         payout_cands = build_payout_candidates(numeric_candidates)
         if not payout_cands:
             st.warning("差枚/差玉/最大差玉/最大持玉 系のカラムが見つからないため、数値カラム先頭をtargetにします。")
             target_col = numeric_candidates[0]
             target_kind = "unknown"
-            target_source = target_col
         else:
             labels = [c["label"] for c in payout_cands]
             picked = st.selectbox("target（差枚相当）に使う列", options=labels, index=0, key="ml_payout_target_pick")
             picked_obj = payout_cands[labels.index(picked)]
             target_col = picked_obj["source"]
             target_kind = picked_obj["canonical"]
-            target_source = picked_obj["source"]
-        st.caption(f"このテーブルでは **{target_source}** を『{target_kind}相当』として予測します（店ごとに列が違うため）。")
+        st.caption(f"このテーブルでは **{target_col}** を『{target_kind}相当』として予測します（店ごとに列が違うため）。")
 
     st.write("✅ 今回予測するもの（target）:", target_col)
 
     # --- 特徴量（共変量）任意 ---
-    default_feats = [c for c in ["累計スタート", "スタート回数", "BB回数", "RB回数", "ART回数", "最大持玉", "最大差玉", "差枚", "差玉"] if c in numeric_candidates]
+    default_feats = [c for c in ["累計スタート", "スタート回数", "BB回数", "RB回数", "ART回数", "最大持玉", "最大差玉"] if c in numeric_candidates]
     feats = st.multiselect("特徴量（共変量）として付けたいカラム（任意）", numeric_candidates, default=default_feats, key="ml_feats")
 
-    # --- 出力形式 ---
+    # --- 出力形式（予測UIは長形式を内部で必ず作る） ---
     out_fmt = st.selectbox(
-        "出力形式",
+        "CSVダウンロード形式",
         [
-            "長形式（Chronos-2 / TimesFM向け）: id,timestamp,target(+特徴量)",
-            "広形式（Moirai/Uni2TS向け）: index=timestamp, columns=id, values=target",
+            "長形式（Chronos-2 / TimesFM向け）",
+            "広形式（timestamp index, series columns）",
         ],
         key="ml_outfmt",
     )
@@ -1119,7 +1212,6 @@ if mode == MODE_ML:
     ) -> pd.DataFrame:
         TBL_Q_inner = q(table_name)
 
-        # slots IN (:slots...) 用
         slots_clause = ""
         bindparams = []
         params = {"m": machine, "s": start, "e": end}
@@ -1129,7 +1221,6 @@ if mode == MODE_ML:
             bindparams.append(sa.bindparam("slots", expanding=True))
             params["slots"] = slots
 
-        # 数値列だけ想定（colsはnumeric候補から選択）
         if avg:
             agg_cols = ", ".join([f"AVG({q(c)}) AS {q(c)}" for c in cols])
             sql = sa.text(
@@ -1166,7 +1257,6 @@ if mode == MODE_ML:
         with eng.connect() as conn:
             return pd.read_sql(sql, conn, params=params)
 
-    # 取得列（target + feats）
     cols_out = list(dict.fromkeys([target_col] + feats))
     avg = (gran == "全台平均（dateで集約）")
     df = fetch_ml_df(table_name, machine_sel, ml_start, ml_end, cols_out, slots_sel, avg)
@@ -1176,7 +1266,6 @@ if mode == MODE_ML:
         st.stop()
 
     # --- series id（系列ID） ---
-    # 例: slot_プレゴ立川|スマスロ北斗|12
     def make_id(row):
         slot = row["台番号"]
         if pd.isna(slot):
@@ -1187,39 +1276,103 @@ if mode == MODE_ML:
     df["id"] = df.apply(make_id, axis=1)
     df["timestamp"] = pd.to_datetime(df["date"])
 
-    # --- ファイル名安全化 ---
-    def safe_filename(s: str) -> str:
-        return re.sub(r'[\\/:*?"<>|]+', "_", s)
+    # --- 必ず長形式（予測UI用に作る） ---
+    out_long = df.rename(columns={target_col: "target"}).copy()
+    keep_cols = ["id", "timestamp", "target"] + [c for c in feats if c in out_long.columns]
+    out_long = out_long[keep_cols].sort_values(["id", "timestamp"])
 
-    # --- 出力 ---
+    # --- 広形式（ダウンロード用） ---
+    out_wide = df.pivot_table(index="timestamp", columns="id", values=target_col, aggfunc="mean").sort_index()
+
+    # --- プレビュー & ダウンロード ---
+    st.subheader("📦 データ出力（プレビュー）")
     if out_fmt.startswith("長形式"):
-        out = df.rename(columns={target_col: "target"}).copy()
-        keep_cols = ["id", "timestamp", "target"] + [c for c in feats if c in out.columns]
-        out = out[keep_cols].sort_values(["id", "timestamp"])
-
-        st.subheader("プレビュー（長形式）")
-        st.dataframe(out.head(50), use_container_width=True)
-
-        csv_bytes = out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.dataframe(out_long.head(50), use_container_width=True)
         st.download_button(
             "⬇️ CSVダウンロード（長形式）",
-            data=csv_bytes,
+            data=out_long.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
             file_name=safe_filename(f"ml_long_{table_name}_{machine_sel}_{ml_start}_{ml_end}.csv"),
             mime="text/csv",
         )
-        st.caption("Chronos-2 / TimesFM向け（id,timestamp,target）です。")
-
+        st.caption("Chronos-2 / TimesFM向け（id,timestamp,target）")
     else:
-        wide = df.pivot_table(index="timestamp", columns="id", values=target_col, aggfunc="mean").sort_index()
-
-        st.subheader("プレビュー（広形式）")
-        st.dataframe(wide.head(50), use_container_width=True)
-
-        csv_bytes = wide.to_csv(index=True, encoding="utf-8-sig").encode("utf-8-sig")
+        st.dataframe(out_wide.head(50), use_container_width=True)
         st.download_button(
             "⬇️ CSVダウンロード（広形式）",
-            data=csv_bytes,
+            data=out_wide.to_csv(index=True, encoding="utf-8-sig").encode("utf-8-sig"),
             file_name=safe_filename(f"ml_wide_{table_name}_{machine_sel}_{ml_start}_{ml_end}.csv"),
             mime="text/csv",
         )
-        st.caption("Moirai/Uni2TS向け（timestamp index, series columns）です。")
+        st.caption("wide形式（timestamp index, series columns）")
+
+    # ============================================================
+    # 🔮 予測をUIで実行（CLI不要）
+    # ============================================================
+    st.divider()
+    st.subheader("🔮 時系列基盤モデルで予測（UI実行）")
+
+    uniq_ids = out_long["id"].unique().tolist()
+    st.caption(f"系列数: {len(uniq_ids)}（多いと重いので、まずは少数で試すのがおすすめ）")
+
+    # 上位N台だけに絞る（だるさ軽減）
+    max_n = min(200, len(uniq_ids))
+    n_pick = st.slider("候補に出す系列数（先頭から）", 1, max_n if max_n >= 1 else 1, min(20, max_n) if max_n >= 1 else 1, key="fcst_topn")
+    cand_ids = uniq_ids[:n_pick]
+
+    pick_ids = st.multiselect("予測する系列（id）", options=cand_ids, default=cand_ids[:1], key="fcst_ids")
+    if not pick_ids:
+        st.warning("少なくとも1つ選んでください。")
+        st.stop()
+
+    df_long_use = out_long[out_long["id"].isin(pick_ids)].copy()
+
+    c1, c2, c3, c4 = st.columns(4)
+    model_name = c1.selectbox("モデル", ["chronos2", "timesfm"], index=0, key="fcst_model")
+    horizon = c2.slider("予測ホライズン（日数）", 1, 60, 14, key="fcst_h")
+    device_map = c3.selectbox("デバイス（Chronos-2）", ["cpu", "cuda"], index=0, key="fcst_dev")
+    freq = c4.selectbox("freq（TimesFM）", ["D", "W", "M"], index=0, key="fcst_freq")
+
+    if st.button("🚀 予測を実行", key="run_forecast"):
+        try:
+            with st.spinner("モデルを準備して予測中…（初回は重いです）"):
+                if model_name == "chronos2":
+                    pred = forecast_with_chronos2(df_long_use[["id", "timestamp", "target"]], horizon=horizon, device_map=device_map)
+                else:
+                    pred = forecast_with_timesfm(df_long_use[["id", "timestamp", "target"]], horizon=horizon, freq=freq)
+
+            # 設定推定（合成確率の場合だけ）
+            if task == TASK_SETTING:
+                thresholds = setting_map.get(machine_sel, {})
+                if not thresholds:
+                    st.error("setting.json にこの機種の設定ラインが無いので、設定推定ができません。")
+                    st.stop()
+
+                pred = pred.copy()
+                pred["pred_setting"] = pred["yhat"].apply(lambda p: score_setting_by_denom(p, thresholds))
+                pred["pred_1_over"] = pred["yhat"].apply(
+                    lambda p: 0 if (p is None or (not np.isfinite(p)) or p <= 0) else int(round(1.0 / p))
+                )
+
+            st.success("予測完了！")
+            st.subheader("予測結果プレビュー")
+            st.dataframe(pred.head(200), use_container_width=True)
+
+            fname = safe_filename(
+                f"pred_{model_name}_{'setting' if task==TASK_SETTING else 'payout'}_{table_name}_{machine_sel}_{ml_start}_{ml_end}.csv"
+            )
+            st.download_button(
+                "⬇️ 予測結果CSVをダウンロード",
+                data=pred.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name=fname,
+                mime="text/csv",
+                key="dl_pred",
+            )
+
+        except ModuleNotFoundError as e:
+            st.error(
+                "必要ライブラリが入っていません。\n"
+                "requirements.txt に torch / transformers / accelerate / chronos-forecasting / timesfm を追加して再デプロイしてください。\n"
+                f"詳細: {e}"
+            )
+        except Exception as e:
+            st.error(f"予測実行でエラー: {e}")
