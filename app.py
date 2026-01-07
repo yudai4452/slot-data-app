@@ -1,3 +1,4 @@
+# app.py
 import io
 import re
 import json
@@ -81,17 +82,20 @@ if eng is None:
     st.stop()
 
 # ============================================================
-# 共通: Postgres 識別子クオート
+# 共通: Postgres 識別子クオート / ファイル名安全化
 # ============================================================
 def q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
 def safe_index_name(table_name: str, suffix: str) -> str:
-    # 日本語テーブルでも index 名を ASCII 寄せして安全にする
     base = re.sub(r"[^0-9a-zA-Z_]+", "_", table_name)
     base = re.sub(r"_+", "_", base).strip("_") or "slot"
     return f"{base}_{suffix}"
+
+
+def safe_filename(s: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]+', "_", s)
 
 
 # ============================================================
@@ -165,7 +169,13 @@ def build_payout_candidates(numeric_candidates: list[str]) -> list[dict]:
         for src in PAYOUT_ALIASES.get(canon, [canon]):
             if src in numeric_candidates and src not in seen_source:
                 seen_source.add(src)
-                out.append({"canonical": canon, "source": src, "label": f"{canon}相当：{src}（{src}）"})
+                out.append(
+                    {
+                        "canonical": canon,
+                        "source": src,
+                        "label": f"{canon}相当：{src}",
+                    }
+                )
     return out
 
 
@@ -224,7 +234,6 @@ def parse_meta(path: str):
     m = DATE_RE.search(parts[-1])
     if not m:
         raise ValueError(f"ファイル名に日付(YYYY-MM-DD)が見つかりません: {parts[-1]}")
-
     date = dt.date.fromisoformat(m.group(0))
     return store, machine, date
 
@@ -244,12 +253,14 @@ def normalize(df_raw: pd.DataFrame, store: str) -> pd.DataFrame:
         ser = df[col].astype(str)
         mask_div = ser.str.contains("/", na=False)
 
+        # "1/113"
         if mask_div.any():
             denom = pd.to_numeric(ser[mask_div].str.split("/", expand=True)[1], errors="coerce")
             val = 1.0 / denom
             val[(denom <= 0) | (~denom.notna())] = 0
             df.loc[mask_div, col] = val
 
+        # "113" → 1/113
         num = pd.to_numeric(ser[~mask_div], errors="coerce")
         conv = num.copy()
         conv[num > 1] = 1.0 / num[num > 1]
@@ -540,7 +551,6 @@ def run_import_for_targets(targets: list[dict], workers: int, use_copy: bool):
                             upsert_dataframe(conn, tbl, df_one)
                         except Exception as ie:
                             errors.append(f"{res['path']} 通常UPSERTでも失敗: {ie}")
-
         else:
             with eng.begin() as conn:
                 for res in items:
@@ -610,7 +620,11 @@ def forecast_with_chronos2(df_long: pd.DataFrame, horizon: int, device_map: str 
     elif "predictions" in pred.columns:
         pred = pred.rename(columns={"predictions": "yhat"})
     else:
-        num_cols = [c for c in pred.columns if c not in {"id", "timestamp"} and pd.api.types.is_numeric_dtype(pred[c])]
+        num_cols = [
+            c
+            for c in pred.columns
+            if c not in {"id", "timestamp"} and pd.api.types.is_numeric_dtype(pred[c])
+        ]
         if not num_cols:
             raise RuntimeError(f"Chronos-2の出力列が想定と違います: {pred.columns.tolist()}")
         pred = pred.rename(columns={num_cols[0]: "yhat"})
@@ -673,10 +687,6 @@ def score_setting_by_denom(pred_prob: float, thresholds: dict) -> str | None:
             best = k
 
     return best
-
-
-def safe_filename(s: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]+', "_", s)
 
 
 # ============================================================
@@ -1111,7 +1121,6 @@ if mode == MODE_ML:
         st.error("数値カラムが見つかりません。")
         st.stop()
 
-    # 確率系を先頭へ
     prob_cols = [c for c in ["合成確率", "BB確率", "RB確率", "ART確率"] if c in numeric_candidates]
     other_cols = [c for c in numeric_candidates if c not in prob_cols]
     numeric_candidates = prob_cols + sorted(other_cols)
@@ -1140,21 +1149,18 @@ if mode == MODE_ML:
         target_col = "合成確率"
         st.caption("合成確率(0〜1)を予測 → 予測値を setting.json の設定ラインに最も近い設定へ割り当てます。")
         if not setting_map.get(machine_sel, {}):
-            st.warning("setting.json にこの機種の設定ラインがありません（設定推定のスコアリングができません）。")
-        target_kind = "prob"
+            st.warning("setting.json にこの機種の設定ラインがありません（設定推定のラベル付けができません）。")
     else:
         payout_cands = build_payout_candidates(numeric_candidates)
         if not payout_cands:
-            st.warning("差枚/差玉/最大差玉/最大持玉 系のカラムが見つからないため、数値カラム先頭をtargetにします。")
+            st.warning("差枚/差玉/最大差玉/最大持玉 系が見つからないため、数値カラム先頭をtargetにします。")
             target_col = numeric_candidates[0]
-            target_kind = "unknown"
         else:
             labels = [c["label"] for c in payout_cands]
             picked = st.selectbox("target（差枚相当）に使う列", options=labels, index=0, key="ml_payout_target_pick")
             picked_obj = payout_cands[labels.index(picked)]
             target_col = picked_obj["source"]
-            target_kind = picked_obj["canonical"]
-        st.caption(f"このテーブルでは **{target_col}** を『{target_kind}相当』として予測します（店ごとに列が違うため）。")
+        st.caption(f"このテーブルでは **{target_col}** を「差枚相当」として予測します（店ごとに列が違うため）。")
 
     st.write("✅ 今回予測するもの（target）:", target_col)
 
@@ -1162,13 +1168,10 @@ if mode == MODE_ML:
     default_feats = [c for c in ["累計スタート", "スタート回数", "BB回数", "RB回数", "ART回数", "最大持玉", "最大差玉"] if c in numeric_candidates]
     feats = st.multiselect("特徴量（共変量）として付けたいカラム（任意）", numeric_candidates, default=default_feats, key="ml_feats")
 
-    # --- 出力形式（予測UIは長形式を内部で必ず作る） ---
+    # --- 出力形式（ダウンロードだけに影響。予測UIは常に長形式を内部使用） ---
     out_fmt = st.selectbox(
         "CSVダウンロード形式",
-        [
-            "長形式（Chronos-2 / TimesFM向け）",
-            "広形式（timestamp index, series columns）",
-        ],
+        ["長形式（Chronos-2 / TimesFM向け）", "広形式（timestamp index, series columns）"],
         key="ml_outfmt",
     )
 
@@ -1276,7 +1279,7 @@ if mode == MODE_ML:
     df["id"] = df.apply(make_id, axis=1)
     df["timestamp"] = pd.to_datetime(df["date"])
 
-    # --- 必ず長形式（予測UI用に作る） ---
+    # --- 長形式（予測UI用） ---
     out_long = df.rename(columns={target_col: "target"}).copy()
     keep_cols = ["id", "timestamp", "target"] + [c for c in feats if c in out_long.columns]
     out_long = out_long[keep_cols].sort_values(["id", "timestamp"])
@@ -1314,9 +1317,14 @@ if mode == MODE_ML:
     uniq_ids = out_long["id"].unique().tolist()
     st.caption(f"系列数: {len(uniq_ids)}（多いと重いので、まずは少数で試すのがおすすめ）")
 
-    # 上位N台だけに絞る（だるさ軽減）
     max_n = min(200, len(uniq_ids))
-    n_pick = st.slider("候補に出す系列数（先頭から）", 1, max_n if max_n >= 1 else 1, min(20, max_n) if max_n >= 1 else 1, key="fcst_topn")
+    n_pick = st.slider(
+        "候補に出す系列数（先頭から）",
+        1,
+        max_n if max_n >= 1 else 1,
+        min(20, max_n) if max_n >= 1 else 1,
+        key="fcst_topn",
+    )
     cand_ids = uniq_ids[:n_pick]
 
     pick_ids = st.multiselect("予測する系列（id）", options=cand_ids, default=cand_ids[:1], key="fcst_ids")
@@ -1336,36 +1344,194 @@ if mode == MODE_ML:
         try:
             with st.spinner("モデルを準備して予測中…（初回は重いです）"):
                 if model_name == "chronos2":
-                    pred = forecast_with_chronos2(df_long_use[["id", "timestamp", "target"]], horizon=horizon, device_map=device_map)
+                    pred = forecast_with_chronos2(
+                        df_long_use[["id", "timestamp", "target"]],
+                        horizon=horizon,
+                        device_map=device_map,
+                    )
                 else:
-                    pred = forecast_with_timesfm(df_long_use[["id", "timestamp", "target"]], horizon=horizon, freq=freq)
+                    pred = forecast_with_timesfm(
+                        df_long_use[["id", "timestamp", "target"]],
+                        horizon=horizon,
+                        freq=freq,
+                    )
 
             # 設定推定（合成確率の場合だけ）
             if task == TASK_SETTING:
                 thresholds = setting_map.get(machine_sel, {})
-                if not thresholds:
-                    st.error("setting.json にこの機種の設定ラインが無いので、設定推定ができません。")
-                    st.stop()
+                if thresholds:
+                    pred = pred.copy()
+                    pred["pred_setting"] = pred["yhat"].apply(lambda p: score_setting_by_denom(p, thresholds))
+                    pred["pred_1_over"] = pred["yhat"].apply(
+                        lambda p: 0 if (p is None or (not np.isfinite(p)) or p <= 0) else int(round(1.0 / p))
+                    )
+                else:
+                    pred = pred.copy()
+                    pred["pred_setting"] = None
+                    pred["pred_1_over"] = None
 
-                pred = pred.copy()
-                pred["pred_setting"] = pred["yhat"].apply(lambda p: score_setting_by_denom(p, thresholds))
-                pred["pred_1_over"] = pred["yhat"].apply(
-                    lambda p: 0 if (p is None or (not np.isfinite(p)) or p <= 0) else int(round(1.0 / p))
+            # ============================================================
+            # ✅ 予測結果を「わかりやすく表示」
+            # ============================================================
+            pred_view = pred.copy()
+            pred_view["timestamp"] = pd.to_datetime(pred_view["timestamp"])
+
+            if task == TASK_SETTING:
+                pred_view["yhat_denom"] = pred_view["yhat"].apply(
+                    lambda p: np.nan if (p is None or (not np.isfinite(p)) or p <= 0) else round(1.0 / float(p))
+                )
+                pred_view["yhat_disp"] = pred_view["yhat_denom"].apply(lambda d: "—" if pd.isna(d) else f"1/{int(d)}")
+            else:
+                pred_view["yhat_disp"] = pred_view["yhat"].apply(
+                    lambda v: "—" if (v is None or pd.isna(v)) else f"{int(round(float(v))):,}"
                 )
 
-            st.success("予測完了！")
-            st.subheader("予測結果プレビュー")
-            st.dataframe(pred.head(200), use_container_width=True)
+            hist = df_long_use[["id", "timestamp", "target"]].copy()
+            hist["timestamp"] = pd.to_datetime(hist["timestamp"])
+            hist = hist.sort_values(["id", "timestamp"])
 
+            st.success("予測完了！")
+            st.subheader("📌 予測結果（見やすい表示）")
+
+            vmode = st.radio("表示", ["グラフ中心", "表中心", "両方"], horizontal=True, index=2, key="pred_view_mode")
+            show_band = st.checkbox("不確実性の帯を表示（Chronos-2の0.1/0.9がある場合）", value=True, key="pred_show_band")
+            hist_days = st.slider("実績を何日分重ねて表示する？", 7, 90, 30, step=1, key="pred_hist_days")
+
+            view_ids = pred_view["id"].unique().tolist()
+            tabs = st.tabs([f"🧩 {i}" for i in view_ids])
+
+            for ti, _id in enumerate(view_ids):
+                with tabs[ti]:
+                    p1 = pred_view[pred_view["id"] == _id].sort_values("timestamp").copy()
+                    h1 = hist[hist["id"] == _id].sort_values("timestamp").copy()
+
+                    if not h1.empty:
+                        last_ts = h1["timestamp"].max()
+                        h1 = h1[h1["timestamp"] >= (last_ts - pd.Timedelta(days=hist_days))].copy()
+
+                    # ---- サマリー ----
+                    cA, cB, cC, cD = st.columns(4)
+                    next_row = p1.iloc[0] if len(p1) > 0 else None
+
+                    if task == TASK_SETTING:
+                        next_disp = next_row["yhat_disp"] if next_row is not None else "—"
+                        next_set = next_row.get("pred_setting", "—") if next_row is not None else "—"
+                        cA.metric("次の日の予測（合成）", next_disp)
+                        cB.metric("次の日の予測設定", str(next_set))
+                    else:
+                        next_disp = next_row["yhat_disp"] if next_row is not None else "—"
+                        cA.metric(f"次の日の予測（{target_col}）", next_disp)
+                        cB.metric("（空）", "")
+
+                    if not p1.empty:
+                        avg_val = float(p1["yhat"].mean())
+                        if task == TASK_SETTING:
+                            avg_disp = "—" if avg_val <= 0 else f"1/{int(round(1/avg_val))}"
+                        else:
+                            avg_disp = f"{int(round(avg_val)):,}"
+                    else:
+                        avg_disp = "—"
+                    cC.metric("予測期間の平均", avg_disp)
+
+                    if len(p1) >= 2:
+                        slope = float(p1["yhat"].iloc[-1] - p1["yhat"].iloc[0])
+                        if task == TASK_SETTING:
+                            d0 = p1["yhat_denom"].iloc[0] if "yhat_denom" in p1.columns else np.nan
+                            d1 = p1["yhat_denom"].iloc[-1] if "yhat_denom" in p1.columns else np.nan
+                            slope_disp = "—" if (pd.isna(d0) or pd.isna(d1)) else f"{int(d1 - d0):+d} (分母差)"
+                        else:
+                            slope_disp = f"{int(round(slope)):+,}"
+                    else:
+                        slope_disp = "—"
+                    cD.metric("期間の変化量（ざっくり）", slope_disp)
+
+                    # ---- グラフ（実績＋予測）----
+                    if vmode in ("グラフ中心", "両方"):
+                        chart_hist = (
+                            alt.Chart(h1)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("timestamp:T", title="日付"),
+                                y=alt.Y("target:Q", title=f"実績（{target_col}）"),
+                                tooltip=[
+                                    alt.Tooltip("timestamp:T", title="日付", format="%Y-%m-%d"),
+                                    alt.Tooltip("target:Q", title="実績", format=".6f" if task == TASK_SETTING else ",.0f"),
+                                ],
+                            )
+                        )
+
+                        chart_pred = (
+                            alt.Chart(p1)
+                            .mark_line(point=True, strokeDash=[4, 2])
+                            .encode(
+                                x=alt.X("timestamp:T", title="日付"),
+                                y=alt.Y("yhat:Q", title=f"予測（{target_col}）"),
+                                tooltip=[
+                                    alt.Tooltip("timestamp:T", title="日付", format="%Y-%m-%d"),
+                                    alt.Tooltip("yhat_disp:N", title="予測(表示用)"),
+                                    alt.Tooltip("yhat:Q", title="予測(数値)", format=".6f" if task == TASK_SETTING else ",.0f"),
+                                ],
+                            )
+                        )
+
+                        band = None
+                        if show_band and ("0.1" in p1.columns) and ("0.9" in p1.columns):
+                            band = (
+                                alt.Chart(p1)
+                                .mark_area(opacity=0.2)
+                                .encode(
+                                    x="timestamp:T",
+                                    y=alt.Y("0.1:Q", title=""),
+                                    y2="0.9:Q",
+                                    tooltip=[
+                                        alt.Tooltip("timestamp:T", title="日付", format="%Y-%m-%d"),
+                                        alt.Tooltip("0.1:Q", title="下振れ(0.1)", format=".6f"),
+                                        alt.Tooltip("0.9:Q", title="上振れ(0.9)", format=".6f"),
+                                    ],
+                                )
+                            )
+
+                        final = (chart_hist + band + chart_pred) if band is not None else (chart_hist + chart_pred)
+                        st.altair_chart(final.properties(height=320), use_container_width=True)
+
+                    # ---- 表（読みやすく）----
+                    if vmode in ("表中心", "両方"):
+                        show_cols = ["timestamp", "yhat_disp"]
+                        rename_map = {"timestamp": "日付", "yhat_disp": "予測値"}
+
+                        if task == TASK_SETTING:
+                            if "pred_setting" in p1.columns:
+                                show_cols += ["pred_setting"]
+                                rename_map["pred_setting"] = "予測設定"
+                            show_cols += ["yhat"]
+                            rename_map["yhat"] = "予測(確率0-1)"
+                        else:
+                            show_cols += ["yhat"]
+                            rename_map["yhat"] = f"予測({target_col})"
+
+                        tdf = p1[show_cols].copy().rename(columns=rename_map)
+                        st.dataframe(tdf, use_container_width=True, height=260)
+
+                        light = p1[["timestamp", "yhat_disp"]].copy()
+                        light = light.rename(columns={"timestamp": "date", "yhat_disp": "prediction"})
+                        st.download_button(
+                            "⬇️ この台だけの軽量CSV（date,prediction）",
+                            data=light.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                            file_name=safe_filename(f"pred_light_{model_name}_{_id}.csv"),
+                            mime="text/csv",
+                            key=f"dl_light_{_id}",
+                        )
+
+            # 全体CSV
             fname = safe_filename(
                 f"pred_{model_name}_{'setting' if task==TASK_SETTING else 'payout'}_{table_name}_{machine_sel}_{ml_start}_{ml_end}.csv"
             )
             st.download_button(
-                "⬇️ 予測結果CSVをダウンロード",
+                "⬇️ 予測結果CSV（全体）をダウンロード",
                 data=pred.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
                 file_name=fname,
                 mime="text/csv",
-                key="dl_pred",
+                key="dl_pred_all",
             )
 
         except ModuleNotFoundError as e:
